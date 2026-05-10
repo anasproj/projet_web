@@ -1,0 +1,7 @@
+# Dépendances et OS
+.DS_Store
+*.log
+
+# Fichiers de sécurité locaux (Ne jamais commit !)
+.env
+certs/
