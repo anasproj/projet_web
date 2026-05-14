@@ -1,0 +1,68 @@
+:root {
+  --bg-primary: #0d0f14;
+  --bg-secondary: #13161e;
+  --bg-card: #1a1f2e;
+  --bg-card-hover: #1f2535;
+
+  --gold: #f5c842;
+  --gold-light: #fad96a;
+  --silver: #b0b8c8;
+  --bronze: #cd7f32;
+
+  --text-primary: #e8eaf0;
+  --text-muted: #7a8099;
+  --text-gold: #f5c842;
+
+  --border: rgba(255, 255, 255, 0.07);
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --font: 'Outfit', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+.navbar {
+  display: flex;
+  align-items: center;
+  padding: 0 32px;
+  height: 64px;
+  background: rgba(13, 15, 20, 0.95);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.2rem;
+  font-weight: 900;
+  color: var(--text-gold);
+}
+
+.page-loader {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-height: 80vh;
+}
+
+.loader-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
