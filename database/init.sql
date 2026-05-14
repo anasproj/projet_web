@@ -41,3 +41,16 @@ CREATE TABLE refresh_tokens (
     token VARCHAR(255) UNIQUE NOT NULL,
     expires_at TIMESTAMP NOT NULL
 );
+
+
+
+-- --- DONNÉES DE TEST ---
+
+-- Insertion de deux équipes
+INSERT INTO teams (name, logo_url) VALUES 
+('FC Barcelone', '/assets/psg.png'),
+('Real Vardrid', '/assets/om.png');
+
+-- Insertion d'un match (en direct, pour préparer votre page Websocket dynamique)
+INSERT INTO matches (home_team_id, away_team_id, match_date, home_score, away_score, status) 
+VALUES (1, 2, CURRENT_TIMESTAMP, 2, 1, 'live');
