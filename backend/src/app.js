@@ -43,6 +43,21 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
+
+  // --- ROUTE : GET /teams ---
+  // Permet de récupérer la liste des équipes depuis la base de données
+  if (url.pathname === "/teams" && req.method === "GET") {
+    try {
+      const result = await client.queryObject("SELECT * FROM teams");
+      return new Response(JSON.stringify(result.rows), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur base de données" }), { status: 500, headers });
+    }
+  }
+
+  
+
   // --- ROUTE PAR DÉFAUT ---
   return new Response(JSON.stringify({ message: "API Foot fonctionnelle !" }), { status: 200, headers });
 });
