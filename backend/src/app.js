@@ -1,3 +1,4 @@
+import { create, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
 import { Client } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
 // 1. Chargement des certificats HTTPS
@@ -48,6 +49,17 @@ function generateSalt() {
 
 
 
+// Fonction pour générer la clé cryptographique pour signer les JWT
+async function getJwtKey() {
+  const secret = Deno.env.get("JWT_SECRET") || "secret_jwt_tres_long_et_complexe";
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(secret);
+  return await crypto.subtle.importKey(
+    "raw", keyData, { name: "HMAC", hash: "SHA-512" }, false, ["sign", "verify"]
+  );
+}
+
+
 
 // 3. Création du serveur HTTP
 Deno.serve({ port: 3000, cert, key }, async (req) => {
@@ -61,7 +73,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   });
 
 
-  
+
 
   // --- ROUTE : POST /register ---
   // Permet de créer un compte avec un mot de passe sécurisé (Sel + Poivre)
@@ -98,6 +110,66 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
+
+
+
+
+  // --- ROUTE : POST /login ---
+  // Permet de se connecter et de recevoir un cookie avec le JWT
+  if (url.pathname === "/login" && req.method === "POST") {
+    try {
+      const body = await req.json();
+      const { username, password } = body;
+
+      // 1. Chercher l'utilisateur en base de données
+      const result = await client.queryObject(
+        "SELECT id, username, password_hash, salt, role FROM users WHERE username = $1",
+        [username]
+      );
+
+      if (result.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Utilisateur introuvable" }), { status: 404, headers });
+      }
+
+      const user = result.rows[0];
+
+      // 2. Vérifier le mot de passe avec le sel de la base
+      const hashToVerify = await hashPassword(password, user.salt);
+      
+      if (hashToVerify !== user.password_hash) {
+        return new Response(JSON.stringify({ error: "Mot de passe incorrect" }), { status: 401, headers });
+      }
+
+      // 3. Le mot de passe est bon ! On génère le JWT
+      const jwtKey = await getJwtKey();
+      const jwt = await create(
+        { alg: "HS512", typ: "JWT" }, // Header
+        { 
+          userId: user.id, 
+          username: user.username, 
+          role: user.role,
+          exp: getNumericDate(60 * 60 * 24) // Expire dans 24h
+        }, 
+        jwtKey // Signature
+      );
+
+      // 4. On crée le cookie HttpOnly (Exigé par le prof)
+      const cookieHeader = `token=${jwt}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`;
+      
+      // On ajoute le cookie à nos headers CORS existants
+      const responseHeaders = new Headers(headers);
+      responseHeaders.append("Set-Cookie", cookieHeader);
+
+      return new Response(JSON.stringify({ message: "Connexion réussie !" }), { 
+        status: 200, 
+        headers: responseHeaders 
+      });
+
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur serveur" }), { status: 500, headers });
+    }
+  }
 
 
 
