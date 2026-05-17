@@ -1,6 +1,6 @@
 import { Client } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
-// 1. Chargement des certificats HTTPS (déjà bien fait par ton collègue)
+// 1. Chargement des certificats HTTPS
 const cert = Deno.readTextFileSync("./certs/server.crt");
 const key = Deno.readTextFileSync("./certs/server.key");
 
@@ -20,6 +20,35 @@ console.log("✅ Connecté avec succès à la base de données PostgreSQL !");
 
 console.log("🚀 Backend Deno prêt sur https://localhost:3000");
 
+
+
+// --- UTILITAIRES DE SÉCURITÉ ---
+
+// Fonction pour hacher le mot de passe avec Sel et Poivre
+async function hashPassword(password, salt) {
+  // Le poivre est un secret serveur (stocké dans le .env, jamais en base de données)
+  const pepper = Deno.env.get("PEPPER_SECRET") || "secret_poivre";
+  
+  // On combine : Mot de passe + Sel + Poivre
+  const dataToHash = password + salt + pepper;
+  
+  // On hache avec l'algorithme SHA-256 natif
+  const dataBuffer = new TextEncoder().encode(dataToHash);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", dataBuffer);
+  
+  // On convertit le résultat en chaîne de caractères (hexadécimal)
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Fonction pour générer un sel aléatoire (Différent pour chaque utilisateur)
+function generateSalt() {
+  return crypto.randomUUID();
+}
+
+
+
+
 // 3. Création du serveur HTTP
 Deno.serve({ port: 3000, cert, key }, async (req) => {
   const url = new URL(req.url);
@@ -30,6 +59,47 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     "Access-Control-Allow-Origin": "http://localhost:8080",
     "Access-Control-Allow-Credentials": "true"
   });
+
+
+  
+
+  // --- ROUTE : POST /register ---
+  // Permet de créer un compte avec un mot de passe sécurisé (Sel + Poivre)
+  if (url.pathname === "/register" && req.method === "POST") {
+    try {
+      // 1. Récupération des données envoyées (comme dans le TD4)
+      const body = await req.json();
+      const { username, password } = body;
+
+      if (!username || !password) {
+        return new Response(JSON.stringify({ error: "Username et password requis" }), { status: 400, headers });
+      }
+
+      // 2. Sécurité : Création du sel et hachage du mot de passe
+      const salt = generateSalt();
+      const passwordHash = await hashPassword(password, salt);
+
+      // 3. Insertion dans la base de données PostgreSQL
+      await client.queryObject(
+        "INSERT INTO users (username, password_hash, salt, role) VALUES ($1, $2, $3, $4)",
+        [username, passwordHash, salt, "fan"]
+      );
+
+      return new Response(JSON.stringify({ message: "Utilisateur créé avec succès !" }), { status: 201, headers });
+    } catch (error) {
+      console.error(error);
+      // Si l'utilisateur existe déjà (erreur de contrainte UNIQUE sur le username)
+      if (error.message.includes("unique constraint") || error.message.includes("duplicate key")) {
+        return new Response(JSON.stringify({ error: "Ce nom d'utilisateur est déjà pris" }), { status: 409, headers });
+      }
+      return new Response(JSON.stringify({ error: "Erreur serveur" }), { status: 500, headers });
+    }
+  }
+
+
+
+
+
 
   // --- ROUTE : GET /matchs ---
   // Permet de récupérer la liste des matchs depuis la base de données
