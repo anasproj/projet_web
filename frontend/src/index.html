@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Foot Stats</title>
+  <meta name="description" content="Suivez vos stats de foot en direct, créez des lobbys et disputez des matchs avec vos amis." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav id="navbar" class="navbar">
+    <a href="#/" class="nav-brand">
+      <span class="brand-icon">⚽</span>
+      <span>LiveFootStats</span>
+    </a>
+    <div class="nav-links">
+      <a href="#/home" class="nav-link">Lobbys</a>
+      <a href="#/ranking" class="nav-link">Classement</a>
+      <a href="#/profile" class="nav-link">Mon Profil</a>
+      <button id="nav-logout" class="btn btn-outline btn-sm">Déconnexion</button>
+    </div>
+  </nav>
+
+  <main id="app">
+    <div class="page-loader">
+      <div class="loader-spinner"></div>
+    </div>
+  </main>
+
+  <div id="goal-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h3 class="modal-title">⚽ Enregistrer un but</h3>
+      <p id="goal-scorer-name" class="modal-subtitle"></p>
+      <div class="modal-section">
+        <label class="modal-label">Passeur décisif :</label>
+        <div id="goal-assist-list" class="assist-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="goal-confirm" class="btn btn-success">Confirmer</button>
+        <button id="goal-cancel" class="btn btn-outline">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
