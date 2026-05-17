@@ -15,4 +15,4 @@ RUN deno cache src/app.js
 EXPOSE 3000
 
 # Démarrage avec les autorisations strictes
-CMD ["run", "--allow-net", "--allow-env", "--allow-read", "src/app.js"]
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "--no-lock", "src/app.js"]
