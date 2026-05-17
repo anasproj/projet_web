@@ -43,6 +43,29 @@ CREATE TABLE refresh_tokens (
 );
 
 
+-- Modification de la table matches (On ajoute les chronos)
+ALTER TABLE matches ADD COLUMN started_at TIMESTAMP;
+ALTER TABLE matches ADD COLUMN ended_at TIMESTAMP;
+
+
+-- Nouvelle table 6 : Les joueurs du match
+CREATE TABLE match_players (
+    match_id INT REFERENCES matches(id) ON DELETE CASCADE,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    team_id INT REFERENCES teams(id) ON DELETE CASCADE,
+    PRIMARY KEY (match_id, user_id)
+);
+
+-- Nouvelle table 7 : Les buts
+CREATE TABLE goals (
+    id SERIAL PRIMARY KEY,
+    match_id INT REFERENCES matches(id) ON DELETE CASCADE,
+    team_id INT REFERENCES teams(id) ON DELETE CASCADE,
+    scorer_id INT REFERENCES users(id) ON DELETE SET NULL,
+    assist_id INT REFERENCES users(id) ON DELETE SET NULL,
+    minute INT NOT NULL
+);
+
 
 -- --- DONNÉES DE TEST ---
 
