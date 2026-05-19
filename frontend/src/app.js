@@ -1,9 +1,14 @@
 const API = 'https://localhost:3000';
+const WS_URL = 'wss://localhost:3000/ws';
 
 const app = document.getElementById('app');
 const navLogout = document.getElementById('nav-logout');
 
 let teamsCache = {};
+let ws = null;
+let liveMatchId = null;
+let chronoInterval = null;
+let matchTimer = 0;
 
 function navigate(path) {
   window.location.hash = path;
@@ -16,6 +21,9 @@ function updateNavLinks(path) {
 }
 
 async function router() {
+  // Nettoyer les minuteurs et connexions websockets actifs avant de changer de route
+  cleanupLiveSession();
+  
   const hash = window.location.hash.replace('#', '') || '/home';
   updateNavLinks(hash.startsWith('/match/') ? '/home' : hash);
   
@@ -99,20 +107,33 @@ async function renderMatchDetails(id) {
       return;
     }
 
+    liveMatchId = match.id;
     const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
     const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
     
     app.innerHTML = `
       <div class="page">
-        <button class="btn btn-outline" onclick="window.location.hash='/home'" style="margin-bottom:20px;">⬅ Retour aux lobbys</button>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+          
+          <div class="status-indicator">
+            <span id="live-status-dot" class="status-dot"></span>
+            <span id="live-status-text" class="text-muted">Connexion...</span>
+          </div>
+        </div>
         
-        <div class="card" style="text-align:center; padding: 40px 20px;">
-          <span class="lobby-badge badge-${match.status === 'live' ? 'live' : match.status === 'finished' ? 'finished' : 'waiting'}" style="margin-bottom:20px; display:inline-block;">${match.status.toUpperCase()}</span>
-          <div style="display:flex; justify-content:center; align-items:center; gap:30px;">
+        <div class="card" style="text-align:center; padding: 40px 20px; position:relative;">
+          <span class="lobby-badge badge-${match.status === 'live' ? 'live' : match.status === 'finished' ? 'finished' : 'waiting'}" style="margin-bottom:12px; display:inline-block;">${match.status.toUpperCase()}</span>
+          
+          <div>
+            <div id="live-match-chrono" class="match-chrono">⏱️ 00:00</div>
+          </div>
+
+          <div style="display:flex; justify-content:center; align-items:center; gap:30px; margin-top:20px;">
             <div style="flex:1; text-align:right;">
               <h2 style="font-size:1.8rem;">${homeTeam}</h2>
             </div>
-            <div style="font-size:3rem; font-weight:900; background:-webkit-linear-gradient(45deg, var(--gold), #ffdf70); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
+            <div id="live-score" style="font-size:3rem; font-weight:900; background:-webkit-linear-gradient(45deg, var(--gold), #ffdf70); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
               ${match.home_score} - ${match.away_score}
             </div>
             <div style="flex:1; text-align:left;">
@@ -124,18 +145,176 @@ async function renderMatchDetails(id) {
           </div>
         </div>
         
-        <div style="margin-top:40px; background:rgba(255,255,255,0.03); border-radius:16px; padding:20px; border:1px solid rgba(255,255,255,0.1);">
-          <h3>💬 Chat en direct (Bientôt)</h3>
-          <p class="text-muted" style="margin-top:10px;">Le chat avec WebSockets sera implémenté lors du prochain push d'Anas (Issue #10).</p>
+        <!-- Live Chat Container -->
+        <div class="chat-container">
+          <div class="chat-header">
+            <h3>💬 Chat en direct</h3>
+            <span id="chat-users-count" class="text-muted" style="font-size:0.8rem;">Déconnecté</span>
+          </div>
+          <div id="chat-messages" class="chat-messages">
+            <div class="chat-message incoming">
+              <span class="username">Système</span>
+              Bienvenue dans le salon de discussion du match ! Restez courtois.
+              <span class="time">${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+            </div>
+          </div>
+          <form id="chat-form" class="chat-input-area">
+            <input id="chat-input-msg" type="text" class="chat-input" placeholder="Écrivez votre message..." autocomplete="off" required />
+            <button type="submit" class="btn btn-success btn-sm" style="padding:0 20px;">Envoyer</button>
+          </form>
         </div>
       </div>
     `;
+
+    // Lier le formulaire de chat
+    document.getElementById('chat-form').addEventListener('submit', handleSendChatMessage);
+
+    // Initialiser le chronomètre du match à une valeur logique pour la démo
+    matchTimer = match.status === 'live' ? 15 * 60 : 0; // Commence à 15:00 pour la démo
+    startChrono();
+
+    // Initialiser la connexion WebSocket
+    initRealtimeConnection();
+
   } catch (e) {
     app.innerHTML = `<div class="page"><p>Erreur lors du chargement des détails du match.</p></div>`;
   }
 }
 
-// Modal Logic
+// Logique du chronomètre
+function startChrono() {
+  const chronoEl = document.getElementById('live-match-chrono');
+  if (!chronoEl) return;
+
+  clearInterval(chronoInterval);
+  chronoInterval = setInterval(() => {
+    matchTimer++;
+    const mins = Math.floor(matchTimer / 60).toString().padStart(2, '0');
+    const secs = (matchTimer % 60).toString().padStart(2, '0');
+    chronoEl.textContent = `⏱️ ${mins}:${secs}`;
+  }, 1000);
+}
+
+// Connexion WebSocket
+function initRealtimeConnection() {
+  const dot = document.getElementById('live-status-dot');
+  const txt = document.getElementById('live-status-text');
+
+  if (!dot || !txt) return;
+
+  console.log("Tentative de connexion WebSocket à :", WS_URL);
+  
+  try {
+    ws = new WebSocket(WS_URL);
+    
+    ws.onopen = () => {
+      dot.className = "status-dot connected";
+      dot.style.background = "#27ae60";
+      dot.style.boxShadow = "0 0 8px #27ae60";
+      txt.textContent = "En direct";
+      txt.style.color = "#27ae60";
+      document.getElementById('chat-users-count').textContent = "Connecté au live";
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleIncomingRealtimeEvent(data);
+      } catch (err) {
+        console.error("Erreur de parsing WebSocket message:", err);
+      }
+    };
+
+    ws.onerror = () => {
+      handleOfflineState();
+    };
+
+    ws.onclose = () => {
+      handleOfflineState();
+    };
+
+  } catch (e) {
+    handleOfflineState();
+  }
+}
+
+function handleOfflineState() {
+  const dot = document.getElementById('live-status-dot');
+  const txt = document.getElementById('live-status-text');
+  const usersCount = document.getElementById('chat-users-count');
+
+  if (dot && txt) {
+    dot.className = "status-dot";
+    dot.style.background = "#e74c3c";
+    dot.style.boxShadow = "none";
+    txt.textContent = "Hors-ligne";
+    txt.style.color = "var(--text-muted)";
+  }
+  if (usersCount) {
+    usersCount.textContent = "Déconnecté";
+  }
+}
+
+function handleIncomingRealtimeEvent(data) {
+  if (data.type === "score_update") {
+    const scoreEl = document.getElementById('live-score');
+    if (scoreEl) {
+      scoreEl.textContent = `${data.home_score} - ${data.away_score}`;
+    }
+  } else if (data.type === "new_message") {
+    appendChatMessage(data.username, data.text, false, data.time);
+  }
+}
+
+function appendChatMessage(username, text, isOutgoing = false, time = null) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const timeStr = time || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  const msgHtml = `
+    <div class="chat-message ${isOutgoing ? 'outgoing' : 'incoming'}">
+      <span class="username">${username}</span>
+      ${text}
+      <span class="time">${timeStr}</span>
+    </div>
+  `;
+  container.insertAdjacentHTML('beforeend', msgHtml);
+  container.scrollTop = container.scrollHeight;
+}
+
+function handleSendChatMessage(e) {
+  e.preventDefault();
+  const input = document.getElementById('chat-input-msg');
+  if (!input) return;
+
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  // Afficher le message envoyé localement
+  appendChatMessage("Moi", msg, true);
+  
+  // Si la connexion WebSocket est active, envoyer le message
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "chat_message",
+      matchId: liveMatchId,
+      text: msg
+    }));
+  }
+
+  input.value = "";
+}
+
+function cleanupLiveSession() {
+  clearInterval(chronoInterval);
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  liveMatchId = null;
+}
+
+// Logique de la modale
 window.openGoalModal = function(matchId, homeTeamId, awayTeamId) {
   const modal = document.getElementById('goal-modal');
   document.getElementById('goal-scorer-name').textContent = "Sélection du buteur en cours...";
