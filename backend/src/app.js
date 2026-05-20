@@ -1,4 +1,4 @@
-import { create, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
+import { create,verify, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
 import { Client } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
 // 1. Chargement des certificats HTTPS
@@ -61,6 +61,24 @@ async function getJwtKey() {
 
 
 
+
+// --- GESTION DES WEBSOCKETS ---
+// Set qui va stocker toutes les connexions actives
+const connectedClients = new Set();
+
+// Fonction utilitaire pour extraire le token JWT depuis le header "Cookie"
+function getCookieToken(req) {
+  const cookieHeader = req.headers.get("cookie");
+  if (!cookieHeader) return null;
+  // Cherche la valeur après "token="
+  const match = cookieHeader.match(/token=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+
+
+
+
 // 3. Création du serveur HTTP
 Deno.serve({ port: 3000, cert, key }, async (req) => {
   const url = new URL(req.url);
@@ -69,9 +87,18 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   const headers = new Headers({
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "http://localhost:8080",
-    "Access-Control-Allow-Credentials": "true"
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS", // On autorise les méthodes
+    "Access-Control-Allow-Headers": "Content-Type" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
   });
 
+
+
+  // --- GESTION DU PREFLIGHT CORS (REQUÊTE OPTIONS) ---
+  // Le navigateur envoie une requête OPTIONS avant le POST pour vérifier les permissions
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers });
+  }
 
 
 
@@ -153,8 +180,8 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
         jwtKey // Signature
       );
 
-      // 4. On crée le cookie HttpOnly (Exigé par le prof)
-      const cookieHeader = `token=${jwt}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`;
+      // 4. On crée le cookie HttpOnly
+      const cookieHeader = `token=${jwt}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=86400`;
       
       // On ajoute le cookie à nos headers CORS existants
       const responseHeaders = new Headers(headers);
@@ -199,6 +226,84 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   }
 
   
+
+
+  // --- ROUTE : GET /ws ---
+  // WebSockets pour le chat en direct (Sécurisé par Cookie JWT)
+  if (url.pathname === "/ws" && req.method === "GET") {
+    try {
+      // 1. On cherche le token dans les cookies
+      const token = getCookieToken(req);
+      if (!token) {
+        console.log("❌ Accès WS refusé : Pas de cookie token");
+        return new Response("Non autorisé", { status: 401, headers });
+      }
+
+      // 2. On vérifie que le token est valide et on récupère les infos de l'utilisateur
+      const jwtKey = await getJwtKey();
+      const payload = await verify(token, jwtKey);
+
+      // 3. Si tout est bon, on "upgrade" la requête HTTP en WebSocket
+      const { socket, response } = Deno.upgradeWebSocket(req);
+
+      // --- ÉVÉNEMENTS WEBSOCKET ---
+      
+      // A. Quand l'utilisateur se connecte
+      socket.onopen = () => {
+        console.log(`🟢 ${payload.username} a rejoint le chat WS !`);
+        connectedClients.add(socket);
+      };
+
+      // B. Quand l'utilisateur envoie un message
+      // B. Quand l'utilisateur envoie un message
+      socket.onmessage = (event) => {
+        try {
+          // 1. On traduit le JSON envoyé par le Frontend
+          const dataFromClient = JSON.parse(event.data);
+          console.log(`💬 ${payload.username} a envoyé : ${dataFromClient.text}`);
+          
+          // 2. On prépare le message propre au format attendu par le Frontend
+          const messageToSend = JSON.stringify({
+            type: "new_message",
+            username: payload.username,
+            text: dataFromClient.text
+          });
+
+          // 3. BROADCAST : On l'envoie à TOUT LE MONDE
+          for (const client of connectedClients) {
+            if (client !== socket && client.readyState === WebSocket.OPEN) {
+              client.send(messageToSend);
+            }
+          }
+        } catch(error) {
+          console.error("Erreur lors de la lecture du message WS :", error);
+        }
+      };
+
+      // C. Quand l'utilisateur quitte la page
+      socket.onclose = () => {
+        console.log(`🔴 ${payload.username} a quitté le chat.`);
+        connectedClients.delete(socket);
+      };
+
+      // D. En cas de crash réseau
+      socket.onerror = (e) => {
+        console.error("Erreur WS :", e);
+        connectedClients.delete(socket);
+      };
+
+      return response;
+
+    } catch (error) {
+      console.error("Erreur WS Auth :", error.message);
+      return new Response("Token invalide ou expiré", { status: 401, headers });
+    }
+  }
+
+
+
+
+
 
   // --- ROUTE PAR DÉFAUT ---
   return new Response(JSON.stringify({ message: "API Foot fonctionnelle !" }), { status: 200, headers });
