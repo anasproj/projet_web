@@ -2,7 +2,6 @@ const API = 'https://localhost:3000';
 const WS_URL = 'wss://localhost:3000/ws';
 
 const app = document.getElementById('app');
-const navLogout = document.getElementById('nav-logout');
 
 let teamsCache = {};
 let ws = null;
@@ -20,14 +19,44 @@ function updateNavLinks(path) {
   });
 }
 
+function handleLogout() {
+  localStorage.removeItem('username');
+  localStorage.removeItem('role');
+  navigate('/login');
+}
+
+function updateNavbar() {
+  const username = localStorage.getItem('username');
+  const navLinks = document.querySelector('.nav-links');
+  if (!navLinks) return;
+
+  if (username) {
+    navLinks.innerHTML = `
+      <a href="#/home" class="nav-link">Lobbys</a>
+      <a href="#/ranking" class="nav-link">Classement</a>
+      <a href="#/profile" class="nav-link">Mon Profil</a>
+      <button id="nav-logout" class="btn btn-outline btn-sm">Déconnexion</button>
+    `;
+    document.getElementById('nav-logout').addEventListener('click', handleLogout);
+  } else {
+    navLinks.innerHTML = `
+      <a href="#/home" class="nav-link">Lobbys</a>
+      <a href="#/login" class="nav-link">Connexion</a>
+    `;
+  }
+}
+
 async function router() {
   // Nettoyer les minuteurs et connexions websockets actifs avant de changer de route
   cleanupLiveSession();
   
   const hash = window.location.hash.replace('#', '') || '/home';
+  updateNavbar();
   updateNavLinks(hash.startsWith('/match/') ? '/home' : hash);
   
-  if (hash.startsWith('/match/')) {
+  if (hash === '/login') {
+    renderLogin();
+  } else if (hash.startsWith('/match/')) {
     const matchId = hash.split('/')[2];
     await renderMatchDetails(matchId);
   } else if (hash === '/ranking') {
@@ -343,16 +372,145 @@ async function renderRanking() {
 }
 
 async function renderProfile() {
+  const username = localStorage.getItem('username');
+  if (!username) {
+    navigate('/login');
+    return;
+  }
+  
   app.innerHTML = `
     <div class="page">
       <div class="page-header">
         <h1>Mon Profil</h1>
         <p class="text-muted">Vos statistiques personnelles.</p>
       </div>
-      <p class="text-muted">Disponible bientôt.</p>
+      <div class="card">
+        <h3 class="card-title">Informations de compte</h3>
+        <p style="margin: 12px 0 6px; font-weight: 600;">Nom d'utilisateur : <span style="color: var(--text-gold);">${username}</span></p>
+        <p style="margin-bottom: 12px; font-weight: 600;">Rôle : <span style="color: var(--text-gold);">${localStorage.getItem('role') || 'Fan'}</span></p>
+      </div>
     </div>`;
 }
 
-navLogout.addEventListener('click', () => navigate('/home'));
+function renderLogin() {
+  app.innerHTML = `
+    <div class="auth-container">
+      <div class="auth-header">
+        <h2>⚽ LiveFootStats</h2>
+        <p>Rejoignez la communauté de fans</p>
+      </div>
+      
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active">Connexion</button>
+        <button id="tab-register" class="auth-tab">S'inscrire</button>
+      </div>
+      
+      <div id="auth-msg" class="auth-message"></div>
+      
+      <form id="auth-form" class="auth-form">
+        <div class="form-group">
+          <label for="auth-username">Nom d'utilisateur</label>
+          <input type="text" id="auth-username" class="form-input" placeholder="Ex: footfan12" required />
+        </div>
+        
+        <div class="form-group">
+          <label for="auth-password">Mot de passe</label>
+          <input type="password" id="auth-password" class="form-input" placeholder="••••••••" required />
+        </div>
+        
+        <button type="submit" id="auth-submit-btn" class="btn btn-success" style="width: 100%; padding: 14px;">
+          Se connecter
+        </button>
+      </form>
+    </div>
+  `;
+
+  let currentTab = 'login';
+  
+  const tabLogin = document.getElementById('tab-login');
+  const tabRegister = document.getElementById('tab-register');
+  const authForm = document.getElementById('auth-form');
+  const authSubmitBtn = document.getElementById('auth-submit-btn');
+  const authMsg = document.getElementById('auth-msg');
+
+  tabLogin.addEventListener('click', () => {
+    currentTab = 'login';
+    tabLogin.classList.add('active');
+    tabRegister.classList.remove('active');
+    authSubmitBtn.textContent = 'Se connecter';
+    authMsg.className = 'auth-message';
+  });
+
+  tabRegister.addEventListener('click', () => {
+    currentTab = 'register';
+    tabRegister.classList.add('active');
+    tabLogin.classList.remove('active');
+    authSubmitBtn.textContent = "S'inscrire";
+    authMsg.className = 'auth-message';
+  });
+
+  authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('auth-username').value.trim();
+    const password = document.getElementById('auth-password').value;
+    
+    authMsg.className = 'auth-message';
+    authSubmitBtn.disabled = true;
+    authSubmitBtn.innerHTML = '<span class="loader-spinner" style="width:20px; height:20px; border-width:2px; display:inline-block; vertical-align: middle;"></span>';
+
+    try {
+      if (currentTab === 'login') {
+        const res = await fetch(`${API}/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+          credentials: 'include'
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Erreur lors de la connexion');
+        }
+
+        localStorage.setItem('username', username);
+        localStorage.setItem('role', 'Fan');
+        
+        authMsg.textContent = 'Connexion réussie ! Redirection...';
+        authMsg.className = 'auth-message success';
+        
+        setTimeout(() => {
+          navigate('/home');
+        }, 1500);
+
+      } else {
+        const res = await fetch(`${API}/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Erreur lors de l'inscription");
+        }
+
+        authMsg.textContent = 'Inscription réussie ! Vous pouvez maintenant vous connecter.';
+        authMsg.className = 'auth-message success';
+        
+        setTimeout(() => {
+          tabLogin.click();
+          document.getElementById('auth-password').value = '';
+        }, 2000);
+      }
+    } catch (err) {
+      authMsg.textContent = err.message;
+      authMsg.className = 'auth-message error';
+    } finally {
+      authSubmitBtn.disabled = false;
+      authSubmitBtn.textContent = currentTab === 'login' ? 'Se connecter' : "S'inscrire";
+    }
+  });
+}
+
 window.addEventListener('hashchange', router);
 router();
