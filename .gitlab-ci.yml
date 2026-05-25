@@ -1,0 +1,9 @@
+stages:
+  - test
+
+tests_unitaires:
+  stage: test
+  image: denoland/deno:alpine
+  script:
+    - echo "Lancement des tests automatiques sur le code d'Anas..."
+    - deno test --allow-all backend/
