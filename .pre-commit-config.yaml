@@ -1,0 +1,12 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: https://github.com/denoland/deno-pre-commit
+    rev: v0.1.2
+    hooks:
+      - id: deno-fmt
+      - id: deno-lint
