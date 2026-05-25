@@ -562,3 +562,130 @@ button:active, .btn:active {
 .nav-link {
   transition: color 0.25s ease, border-color 0.25s ease !important;
 }
+
+/* ===== CARTE FUT ===== */
+.fut-card-wrapper {
+  display: flex;
+  justify-content: center;
+  margin: 32px 0;
+}
+
+.fut-card {
+  width: 200px;
+  height: 280px;
+  border-radius: 16px;
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  position: relative;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  cursor: default;
+  font-family: var(--font);
+}
+
+.fut-card:hover { 
+  transform: scale(1.06) rotate(-1deg); 
+}
+
+.fut-card.bronze {
+  background: linear-gradient(145deg, #8b5a1e 0%, #cd7f32 50%, #a06020 100%);
+  border: 2px solid #cd7f32;
+}
+
+.fut-card.silver {
+  background: linear-gradient(145deg, #5a6070 0%, #b0b8c8 50%, #6a7080 100%);
+  border: 2px solid #b0b8c8;
+}
+
+.fut-card.gold {
+  background: linear-gradient(145deg, #8b6914 0%, #f5c842 50%, #b08020 100%);
+  border: 2px solid #f5c842;
+  box-shadow: 0 8px 32px rgba(245, 200, 66, 0.4);
+}
+
+.fut-card-ovr { 
+  font-size: 2.6rem; 
+  font-weight: 900; 
+  color: rgba(0, 0, 0, 0.85); 
+  line-height: 1; 
+  text-align: center;
+  margin-top: 10px;
+}
+
+.fut-card-name {
+  font-size: 0.95rem;
+  font-weight: 900;
+  color: rgba(0, 0, 0, 0.85);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-align: center;
+}
+
+.fut-card-divider { 
+  width: 80%; 
+  height: 1px; 
+  background: rgba(0, 0, 0, 0.25); 
+  margin: 4px 0;
+}
+
+.fut-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+  width: 100%;
+  padding: 0 8px;
+}
+
+.fut-stat {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: rgba(0, 0, 0, 0.7);
+}
+
+.fut-stat-val { 
+  font-weight: 900; 
+  color: rgba(0, 0, 0, 0.9); 
+}
+
+/* ===== GRILLE DU PROFIL ===== */
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.stat-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.stat-box:hover {
+  border-color: rgba(245, 200, 66, 0.2);
+  background: var(--bg-card-hover);
+}
+
+.stat-value { 
+  font-size: 2rem; 
+  font-weight: 900; 
+  color: var(--gold); 
+}
+
+.stat-label { 
+  font-size: 0.75rem; 
+  color: var(--text-muted); 
+  margin-top: 6px; 
+  font-weight: 700; 
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}

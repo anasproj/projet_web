@@ -187,7 +187,10 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const responseHeaders = new Headers(headers);
       responseHeaders.append("Set-Cookie", cookieHeader);
 
-      return new Response(JSON.stringify({ message: "Connexion réussie !" }), { 
+      return new Response(JSON.stringify({ 
+        message: "Connexion réussie !",
+        user: { id: user.id, username: user.username, role: user.role }
+      }), { 
         status: 200, 
         headers: responseHeaders 
       });
@@ -304,6 +307,91 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
+
+  // --- ROUTE : GET /profile/:id ---
+  // Permet de récupérer les informations de profil et statistiques d'un joueur
+  if (url.pathname.startsWith("/profile/") && req.method === "GET") {
+    try {
+      const userIdStr = url.pathname.split("/")[2];
+      const userId = parseInt(userIdStr);
+      if (isNaN(userId)) {
+        return new Response(JSON.stringify({ error: "ID invalide" }), { status: 400, headers });
+      }
+
+      // 1. Récupérer l'utilisateur
+      const userResult = await client.queryObject(
+        "SELECT id, username, role FROM users WHERE id = $1",
+        [userId]
+      );
+
+      if (userResult.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Utilisateur introuvable" }), { status: 404, headers });
+      }
+
+      const user = userResult.rows[0];
+
+      // 2. Calculer les statistiques du joueur dynamiquement
+      // Matchs joués
+      const matchesPlayedResult = await client.queryObject(
+        "SELECT COUNT(*) as count FROM match_players WHERE user_id = $1",
+        [userId]
+      );
+      const matches_played = Number(matchesPlayedResult.rows[0].count);
+
+      // Buts marqués
+      const goalsResult = await client.queryObject(
+        "SELECT COUNT(*) as count FROM goals WHERE scorer_id = $1",
+        [userId]
+      );
+      const goals = Number(goalsResult.rows[0].count);
+
+      // Passes décisives
+      const assistsResult = await client.queryObject(
+        "SELECT COUNT(*) as count FROM goals WHERE assist_id = $1",
+        [userId]
+      );
+      const assists = Number(assistsResult.rows[0].count);
+
+      // Mock logique cohérente pour les victoires/défaites
+      const wins = Math.ceil(matches_played * 0.5);
+      const losses = Math.floor(matches_played * 0.4);
+      const draws = matches_played - wins - losses;
+      
+      const rating_shot = Math.min(99, 50 + goals * 5);
+      const rating_pass = Math.min(99, 50 + assists * 5);
+      const rating_victory = Math.min(99, 50 + wins * 6);
+      const rating_defense = Math.min(99, 50 + (matches_played - goals) * 2);
+      const rating_form = Math.min(99, 50 + wins * 4);
+      const overall = Math.round((rating_shot + rating_pass + rating_victory + rating_defense + rating_form) / 5);
+
+      user.created_at = new Date().toISOString(); // Mock date
+      user.stats = {
+        overall,
+        rating_shot,
+        rating_pass,
+        rating_victory,
+        rating_form,
+        rating_defense,
+        matches_played,
+        wins,
+        losses,
+        draws,
+        goals,
+        assists,
+        motm_count: 0,
+        current_streak: wins,
+        best_streak: wins
+      };
+
+      return new Response(JSON.stringify({
+        user,
+        recentMatches: []
+      }), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur serveur" }), { status: 500, headers });
+    }
+  }
 
   // --- ROUTE PAR DÉFAUT ---
   return new Response(JSON.stringify({ message: "API Foot fonctionnelle !" }), { status: 200, headers });

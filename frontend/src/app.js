@@ -66,8 +66,10 @@ async function router() {
     await renderMatchDetails(matchId);
   } else if (hash === '/ranking') {
     await renderRanking();
-  } else if (hash === '/profile') {
-    await renderProfile();
+  } else if (hash.startsWith('/profile')) {
+    const parts = hash.split('/');
+    const userId = parts[2];
+    await renderProfile(userId);
   } else {
     await renderHome();
   }
@@ -386,25 +388,93 @@ async function renderRanking() {
     </div>`;
 }
 
-async function renderProfile() {
-  const username = localStorage.getItem('username');
-  if (!username) {
+function renderFutCard(stats, username) {
+  const ovr = stats?.overall ?? 50;
+  const tier = ovr >= 80 ? "gold" : ovr >= 60 ? "silver" : "bronze";
+
+  return `
+    <div class="fut-card-wrapper">
+      <div class="fut-card ${tier}">
+        <div class="fut-card-ovr">${ovr}</div>
+        <div class="fut-card-name">${username}</div>
+        <div class="fut-card-divider"></div>
+        <div class="fut-card-stats">
+          <div class="fut-stat"><span>TIR</span><span class="fut-stat-val">${stats?.rating_shot ?? 50}</span></div>
+          <div class="fut-stat"><span>PAS</span><span class="fut-stat-val">${stats?.rating_pass ?? 50}</span></div>
+          <div class="fut-stat"><span>VIC</span><span class="fut-stat-val">${stats?.rating_victory ?? 50}</span></div>
+          <div class="fut-stat"><span>FOR</span><span class="fut-stat-val">${stats?.rating_form ?? 50}</span></div>
+          <div class="fut-stat"><span>DEF</span><span class="fut-stat-val">${stats?.rating_defense ?? 50}</span></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function renderProfile(userId) {
+  const currentUsername = localStorage.getItem('username');
+  if (!currentUsername) {
     navigate('/login');
     return;
   }
-  
+
+  // Fallback à l'ID 1 si non connecté ou non trouvé localement
+  let id = userId || localStorage.getItem('userId') || '1';
+
   app.innerHTML = `
-    <div class="page">
-      <div class="page-header">
-        <h1>Mon Profil</h1>
-        <p class="text-muted">Vos statistiques personnelles.</p>
-      </div>
-      <div class="card">
-        <h3 class="card-title">Informations de compte</h3>
-        <p style="margin: 12px 0 6px; font-weight: 600;">Nom d'utilisateur : <span style="color: var(--text-gold);">${username}</span></p>
-        <p style="margin-bottom: 12px; font-weight: 600;">Rôle : <span style="color: var(--text-gold);">${localStorage.getItem('role') || 'Fan'}</span></p>
-      </div>
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement du profil...</p>
     </div>`;
+
+  try {
+    const data = await apiFetch(`/profile/${id}`);
+    const { user, recentMatches } = data;
+    const stats = user.stats;
+    const winRate = stats?.matches_played
+      ? Math.round((stats.wins / stats.matches_played) * 100)
+      : 0;
+
+    function wl(label, value) {
+      return `<div class="stat-box"><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`;
+    }
+
+    app.innerHTML = `
+      <div class="page fade-in">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
+          <div>
+            <h1 style="font-size:2rem; font-weight:900; margin:0;">Profil de ${user.username}</h1>
+            <div style="margin-top:8px;">
+              <span class="role-badge role-player" style="text-transform:uppercase;">${user.role}</span>
+            </div>
+          </div>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">← Retour</button>
+        </div>
+
+        ${renderFutCard(stats, user.username)}
+
+        <!-- Statistiques détaillées -->
+        <h2 style="font-size:1.3rem; font-weight:700; margin: 32px 0 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">Statistiques Générales</h2>
+        <div class="profile-grid">
+          ${wl("Matchs joués", stats?.matches_played ?? 0)}
+          ${wl("Victoires", stats?.wins ?? 0)}
+          ${wl("Défaites", stats?.losses ?? 0)}
+          ${wl("Nuls", stats?.draws ?? 0)}
+          ${wl("Buts", stats?.goals ?? 0)}
+          ${wl("Passes D.", stats?.assists ?? 0)}
+          ${wl("MVP", stats?.motm_count ?? 0)}
+          ${wl("Win Rate", `${winRate}%`)}
+          ${wl("Série act.", stats?.current_streak ?? 0)}
+          ${wl("Meilleure série", stats?.best_streak ?? 0)}
+        </div>
+      </div>`;
+  } catch (error) {
+    console.error("Impossible de charger le profil", error);
+    app.innerHTML = `
+      <div class="page">
+        <p class="text-muted">Impossible de charger le profil.</p>
+        <button class="btn btn-outline" onclick="window.location.hash='/home'">Retour</button>
+      </div>`;
+  }
 }
 
 function renderLogin() {
@@ -487,8 +557,14 @@ function renderLogin() {
           throw new Error(data.error || 'Erreur lors de la connexion');
         }
 
-        localStorage.setItem('username', username);
-        localStorage.setItem('role', 'Fan');
+        if (data.user) {
+          localStorage.setItem('userId', data.user.id);
+          localStorage.setItem('username', data.user.username);
+          localStorage.setItem('role', data.user.role || 'Fan');
+        } else {
+          localStorage.setItem('username', username);
+          localStorage.setItem('role', 'Fan');
+        }
         
         authMsg.textContent = 'Connexion réussie ! Redirection...';
         authMsg.className = 'auth-message success';
