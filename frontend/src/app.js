@@ -50,6 +50,11 @@ async function router() {
   // Nettoyer les minuteurs et connexions websockets actifs avant de changer de route
   cleanupLiveSession();
   
+  // Transition en fondu : on réinitialise la classe d'animation
+  app.classList.remove('fade-in');
+  void app.offsetWidth; // Force la refonte pour relancer l'animation
+  app.classList.add('fade-in');
+  
   const hash = window.location.hash.replace('#', '') || '/home';
   updateNavbar();
   updateNavLinks(hash.startsWith('/match/') ? '/home' : hash);
@@ -86,7 +91,12 @@ async function loadTeams() {
 }
 
 async function renderHome() {
-  app.innerHTML = `<div class="page-loader"><div class="loader-spinner"></div></div>`;
+  app.innerHTML = `
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement des matchs en direct...</p>
+    </div>`;
   try {
     await loadTeams();
     const data = await apiFetch('/matchs');
@@ -124,7 +134,12 @@ async function renderHome() {
 }
 
 async function renderMatchDetails(id) {
-  app.innerHTML = `<div class="page-loader"><div class="loader-spinner"></div></div>`;
+  app.innerHTML = `
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement des détails du match...</p>
+    </div>`;
   try {
     await loadTeams();
     const data = await apiFetch('/matchs');
