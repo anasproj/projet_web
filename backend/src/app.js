@@ -89,7 +89,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     "Access-Control-Allow-Origin": "http://localhost:8080",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS", // On autorise les méthodes
-    "Access-Control-Allow-Headers": "Content-Type" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
+    "Access-Control-Allow-Headers": "Content-Type, Authorization" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
   });
 
 
@@ -181,7 +181,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       );
 
       // 4. On crée le cookie HttpOnly
-      const cookieHeader = `token=${jwt}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=86400`;
+      const cookieHeader = `token=${jwt}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`;
       
       // On ajoute le cookie à nos headers CORS existants
       const responseHeaders = new Headers(headers);
