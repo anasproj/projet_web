@@ -49,16 +49,16 @@ function updateNavbar() {
 async function router() {
   // Nettoyer les minuteurs et connexions websockets actifs avant de changer de route
   cleanupLiveSession();
-  
+
   // Transition en fondu : on réinitialise la classe d'animation
   app.classList.remove('fade-in');
   void app.offsetWidth; // Force la refonte pour relancer l'animation
   app.classList.add('fade-in');
-  
+
   const hash = window.location.hash.replace('#', '') || '/home';
   updateNavbar();
   updateNavLinks(hash.startsWith('/match/') ? '/home' : hash);
-  
+
   if (hash === '/login') {
     renderLogin();
   } else if (hash.startsWith('/match/')) {
@@ -103,12 +103,8 @@ async function renderHome() {
     await loadTeams();
     const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data : [];
-    
-    if (matchs.length === 0) {
-      app.innerHTML = `<div class="page"><div class="page-header"><h1>Lobbys</h1><p class="text-muted">Aucun match disponible pour le moment.</p></div></div>`;
-      return;
-    }
-    
+    const username = localStorage.getItem('username');
+
     const cards = matchs.map(m => {
       const homeTeam = teamsCache[m.home_team_id]?.name || "Équipe Domicile";
       const awayTeam = teamsCache[m.away_team_id]?.name || "Équipe Extérieur";
@@ -121,16 +117,31 @@ async function renderHome() {
         <p class="text-muted" style="font-size:0.85rem; font-weight:700; color:white;">Score : <span style="color:var(--gold)">${m.home_score} - ${m.away_score}</span></p>
       </div>
     `}).join('');
-    
+
     app.innerHTML = `
       <div class="page">
-        <div class="page-header">
-          <h1>Lobbys</h1>
-          <p class="text-muted">Rejoignez un match en cours ou attendez le prochain.</p>
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
+          <div>
+            <h1>Lobbys</h1>
+            <p class="text-muted">Rejoignez un match en cours ou créez le vôtre.</p>
+          </div>
+          ${username ? `<button class="btn btn-success" id="btn-create-lobby" style="display:flex; align-items:center; gap:8px;">🏆 Créer un lobby</button>` : ''}
         </div>
-        <div class="lobbies-grid">${cards}</div>
+        ${matchs.length === 0 ? `
+          <p class="text-muted" style="text-align:center; padding:40px 0;">Aucun match disponible pour le moment.</p>
+        ` : `
+          <div class="lobbies-grid">${cards}</div>
+        `}
       </div>`;
-  } catch {
+
+    if (username) {
+      const btn = document.getElementById('btn-create-lobby');
+      if (btn) {
+        btn.addEventListener('click', openCreateLobbyModal);
+      }
+    }
+  } catch (err) {
+    console.error(err);
     app.innerHTML = `<div class="page"><p class="text-muted">Impossible de charger les matchs. Vérifiez que le backend est démarré.</p></div>`;
   }
 }
@@ -147,7 +158,7 @@ async function renderMatchDetails(id) {
     const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data : [];
     const match = matchs.find(m => m.id == id);
-    
+
     if (!match) {
       app.innerHTML = `<div class="page"><p>Match introuvable.</p><button class="btn btn-outline" onclick="window.location.hash='/home'">Retour</button></div>`;
       return;
@@ -156,7 +167,7 @@ async function renderMatchDetails(id) {
     liveMatchId = match.id;
     const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
     const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
-    
+
     app.innerHTML = `
       <div class="page">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
@@ -201,7 +212,7 @@ async function renderMatchDetails(id) {
             <div class="chat-message incoming">
               <span class="username">Système</span>
               Bienvenue dans le salon de discussion du match ! Restez courtois.
-              <span class="time">${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+              <span class="time">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
           </div>
           <form id="chat-form" class="chat-input-area">
@@ -249,10 +260,10 @@ function initRealtimeConnection() {
   if (!dot || !txt) return;
 
   console.log("Tentative de connexion WebSocket à :", WS_URL);
-  
+
   try {
     ws = new WebSocket(WS_URL);
-    
+
     ws.onopen = () => {
       dot.className = "status-dot connected";
       dot.style.background = "#27ae60";
@@ -316,7 +327,7 @@ function appendChatMessage(username, text, isOutgoing = false, time = null) {
   const container = document.getElementById('chat-messages');
   if (!container) return;
 
-  const timeStr = time || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  const timeStr = time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const msgHtml = `
     <div class="chat-message ${isOutgoing ? 'outgoing' : 'incoming'}">
       <span class="username">${username}</span>
@@ -338,7 +349,7 @@ function handleSendChatMessage(e) {
 
   // Afficher le message envoyé localement
   appendChatMessage("Moi", msg, true);
-  
+
   // Si la connexion WebSocket est active, envoyer le message
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
@@ -361,7 +372,7 @@ function cleanupLiveSession() {
 }
 
 // Logique de la modale
-window.openGoalModal = function(matchId, homeTeamId, awayTeamId) {
+window.openGoalModal = function (matchId, homeTeamId, awayTeamId) {
   const modal = document.getElementById('goal-modal');
   document.getElementById('goal-scorer-name').textContent = "Sélection du buteur en cours...";
   modal.classList.remove('hidden');
@@ -374,6 +385,75 @@ document.getElementById('goal-cancel').addEventListener('click', () => {
 document.getElementById('goal-confirm').addEventListener('click', () => {
   alert("Fonctionnalité d'enregistrement à lier avec l'API (Issue #6)");
   document.getElementById('goal-modal').classList.add('hidden');
+});
+
+// Modale de création de Lobby
+window.openCreateLobbyModal = function () {
+  const modal = document.getElementById('lobby-modal');
+  const homeSelect = document.getElementById('lobby-home-team');
+  const awaySelect = document.getElementById('lobby-away-team');
+  const errorDiv = document.getElementById('lobby-error');
+
+  errorDiv.classList.add('hidden');
+  errorDiv.textContent = '';
+
+  const options = Object.values(teamsCache)
+    .map(team => `<option value="${team.id}">${team.name}</option>`)
+    .join('');
+
+  homeSelect.innerHTML = options;
+  awaySelect.innerHTML = options;
+
+  if (homeSelect.options.length > 1) {
+    awaySelect.selectedIndex = 1;
+  }
+
+  modal.classList.remove('hidden');
+};
+
+document.getElementById('lobby-cancel').addEventListener('click', () => {
+  document.getElementById('lobby-modal').classList.add('hidden');
+});
+
+document.getElementById('lobby-confirm').addEventListener('click', async () => {
+  const homeTeamId = document.getElementById('lobby-home-team').value;
+  const awayTeamId = document.getElementById('lobby-away-team').value;
+  const errorDiv = document.getElementById('lobby-error');
+
+  errorDiv.classList.add('hidden');
+  errorDiv.textContent = '';
+
+  if (!homeTeamId || !awayTeamId) {
+    errorDiv.textContent = "Veuillez sélectionner deux équipes.";
+    errorDiv.classList.remove('hidden');
+    return;
+  }
+
+  if (parseInt(homeTeamId) === parseInt(awayTeamId)) {
+    errorDiv.textContent = "Veuillez choisir deux équipes différentes.";
+    errorDiv.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/matchs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ home_team_id: homeTeamId, away_team_id: awayTeamId }),
+      credentials: 'include'
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Erreur lors de la création du match.");
+    }
+
+    document.getElementById('lobby-modal').classList.add('hidden');
+    await renderHome();
+  } catch (err) {
+    errorDiv.textContent = err.message;
+    errorDiv.classList.remove('hidden');
+  }
 });
 
 
@@ -511,7 +591,7 @@ function renderLogin() {
   `;
 
   let currentTab = 'login';
-  
+
   const tabLogin = document.getElementById('tab-login');
   const tabRegister = document.getElementById('tab-register');
   const authForm = document.getElementById('auth-form');
@@ -538,7 +618,7 @@ function renderLogin() {
     e.preventDefault();
     const username = document.getElementById('auth-username').value.trim();
     const password = document.getElementById('auth-password').value;
-    
+
     authMsg.className = 'auth-message';
     authSubmitBtn.disabled = true;
     authSubmitBtn.innerHTML = '<span class="loader-spinner" style="width:20px; height:20px; border-width:2px; display:inline-block; vertical-align: middle;"></span>';
@@ -565,10 +645,10 @@ function renderLogin() {
           localStorage.setItem('username', username);
           localStorage.setItem('role', 'Fan');
         }
-        
+
         authMsg.textContent = 'Connexion réussie ! Redirection...';
         authMsg.className = 'auth-message success';
-        
+
         setTimeout(() => {
           navigate('/home');
         }, 1500);
@@ -587,7 +667,7 @@ function renderLogin() {
 
         authMsg.textContent = 'Inscription réussie ! Vous pouvez maintenant vous connecter.';
         authMsg.className = 'auth-message success';
-        
+
         setTimeout(() => {
           tabLogin.click();
           document.getElementById('auth-password').value = '';

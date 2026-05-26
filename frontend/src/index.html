@@ -45,6 +45,32 @@
     </div>
   </div>
 
+  <div id="lobby-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h3 class="modal-title">🏆 Créer un nouveau Lobby</h3>
+      <p class="modal-subtitle">Configurez un match en direct pour commencer à enregistrer des scores.</p>
+      
+      <div class="modal-section" style="display:flex; flex-direction:column; gap:16px;">
+        <div>
+          <label class="modal-label">Équipe Domicile :</label>
+          <select id="lobby-home-team" class="form-input" style="width:100%; box-sizing:border-box;"></select>
+        </div>
+        
+        <div>
+          <label class="modal-label">Équipe Extérieur :</label>
+          <select id="lobby-away-team" class="form-input" style="width:100%; box-sizing:border-box;"></select>
+        </div>
+
+        <div id="lobby-error" class="auth-message error hidden" style="margin-top:0;"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button id="lobby-confirm" class="btn btn-success">Créer le Match</button>
+        <button id="lobby-cancel" class="btn btn-outline">Annuler</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>

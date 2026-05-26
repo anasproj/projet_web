@@ -22,7 +22,8 @@ CREATE TABLE matches (
     match_date TIMESTAMP NOT NULL,
     home_score INT DEFAULT 0,
     away_score INT DEFAULT 0,
-    status VARCHAR(20) DEFAULT 'scheduled' -- statuts possibles: scheduled, live, finished
+    status VARCHAR(20) DEFAULT 'scheduled', -- statuts possibles: scheduled, live, finished
+    creator_id INT REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- 4. Table des messages (Chat en direct lié aux WebSockets)
