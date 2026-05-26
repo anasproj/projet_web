@@ -215,6 +215,45 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
+  // --- ROUTE : POST /matchs ---
+  // Permet à un utilisateur connecté de créer un match/lobby (avec creator_id)
+  if (url.pathname === "/matchs" && req.method === "POST") {
+    try {
+      // 1. Authentification
+      const token = getCookieToken(req);
+      if (!token) {
+        return new Response(JSON.stringify({ error: "Non autorisé (pas de token)" }), { status: 401, headers });
+      }
+      
+      const jwtKey = await getJwtKey();
+      const payload = await verify(token, jwtKey);
+      const creatorId = payload.userId;
+
+      // 2. Parser le body
+      const body = await req.json();
+      const { home_team_id, away_team_id } = body;
+
+      if (!home_team_id || !away_team_id) {
+        return new Response(JSON.stringify({ error: "Équipe domicile et équipe extérieur requises" }), { status: 400, headers });
+      }
+
+      if (parseInt(home_team_id) === parseInt(away_team_id)) {
+        return new Response(JSON.stringify({ error: "L'équipe domicile doit être différente de l'équipe extérieur" }), { status: 400, headers });
+      }
+
+      // 3. Insérer le match en BDD
+      const result = await client.queryObject(
+        "INSERT INTO matches (home_team_id, away_team_id, match_date, home_score, away_score, status, creator_id) VALUES ($1, $2, CURRENT_TIMESTAMP, 0, 0, 'live', $3) RETURNING *",
+        [parseInt(home_team_id), parseInt(away_team_id), creatorId]
+      );
+
+      return new Response(JSON.stringify(result.rows[0]), { status: 201, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur serveur lors de la création du match" }), { status: 500, headers });
+    }
+  }
+
 
   // --- ROUTE : GET /teams ---
   // Permet de récupérer la liste des équipes depuis la base de données
