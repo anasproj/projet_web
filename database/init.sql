@@ -14,17 +14,25 @@ CREATE TABLE teams (
     logo_url VARCHAR(255)
 );
 
--- 3. Table des matchs (pour gérer le live score dynamique)
+
+
+-- 3. Table des matchs (pour gérer le live score dynamique et les Salons)
 CREATE TABLE matches (
     id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL DEFAULT 'Match Amical', -- Nom du salon
+    rules TEXT, -- Règles du salon
     home_team_id INT REFERENCES teams(id) ON DELETE CASCADE,
     away_team_id INT REFERENCES teams(id) ON DELETE CASCADE,
-    match_date TIMESTAMP NOT NULL,
+    match_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     home_score INT DEFAULT 0,
     away_score INT DEFAULT 0,
-    status VARCHAR(20) DEFAULT 'scheduled', -- statuts possibles: scheduled, live, finished
-    creator_id INT REFERENCES users(id) ON DELETE SET NULL
+    status VARCHAR(20) DEFAULT 'scheduled', -- scheduled (en salon), live (en cours), finished
+    creator_id INT REFERENCES users(id) ON DELETE SET NULL,
+    started_at TIMESTAMP,
+    ended_at TIMESTAMP
 );
+
+
 
 -- 4. Table des messages (Chat en direct lié aux WebSockets)
 CREATE TABLE live_messages (
@@ -44,9 +52,7 @@ CREATE TABLE refresh_tokens (
 );
 
 
--- Modification de la table matches (On ajoute les chronos)
-ALTER TABLE matches ADD COLUMN started_at TIMESTAMP;
-ALTER TABLE matches ADD COLUMN ended_at TIMESTAMP;
+
 
 
 -- Nouvelle table 6 : Les joueurs du match
