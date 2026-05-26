@@ -370,6 +370,69 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
+
+
+  
+
+// --- ROUTE : GET /leaderboard ---
+  // Permet de récupérer le classement de tous les joueurs trié par note globale (OVR)
+  if (url.pathname === "/leaderboard" && req.method === "GET") {
+    try {
+      // 1. Requête SQL d'agrégation pour récupérer les stats de base de tous les joueurs
+      const query = `
+        SELECT 
+          u.id, 
+          u.username,
+          COUNT(DISTINCT mp.match_id) AS matches_played,
+          COUNT(DISTINCT g.id) AS goals,
+          COUNT(DISTINCT a.id) AS assists
+        FROM users u
+        LEFT JOIN match_players mp ON u.id = mp.user_id
+        LEFT JOIN goals g ON u.id = g.scorer_id
+        LEFT JOIN goals a ON u.id = a.assist_id
+        GROUP BY u.id, u.username
+      `;
+      const result = await client.queryObject(query);
+      
+      // 2. Calcul de la note globale (OVR) pour chaque joueur (même logique que le profil)
+      const leaderboard = result.rows.map(user => {
+        const matches_played = Number(user.matches_played);
+        const goals = Number(user.goals);
+        const assists = Number(user.assists);
+        
+        // Calculs simulés des victoires et notes
+        const wins = Math.ceil(matches_played * 0.5);
+        const rating_shot = Math.min(99, 50 + goals * 5);
+        const rating_pass = Math.min(99, 50 + assists * 5);
+        const rating_victory = Math.min(99, 50 + wins * 6);
+        const rating_defense = Math.min(99, 50 + (matches_played - goals) * 2);
+        const rating_form = Math.min(99, 50 + wins * 4);
+        
+        const overall = Math.round((rating_shot + rating_pass + rating_victory + rating_defense + rating_form) / 5);
+
+        return {
+          id: user.id,
+          username: user.username,
+          matches_played,
+          goals,
+          assists,
+          wins,
+          overall
+        };
+      });
+
+      // 3. Trier le tableau : du meilleur joueur (overall le plus élevé) au moins bon
+      leaderboard.sort((a, b) => b.overall - a.overall);
+
+      // On retourne le Top 50 pour éviter de surcharger le Frontend
+      return new Response(JSON.stringify(leaderboard.slice(0, 50)), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur lors de la génération du leaderboard" }), { status: 500, headers });
+    }
+  }
+
+
   
 
 

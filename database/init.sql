@@ -84,3 +84,8 @@ INSERT INTO teams (name, logo_url) VALUES
 -- Insertion d'un match (en direct, pour préparer votre page Websocket dynamique)
 INSERT INTO matches (home_team_id, away_team_id, match_date, home_score, away_score, status) 
 VALUES (1, 2, CURRENT_TIMESTAMP, 2, 1, 'live');
+
+
+-- --- OPTIMISATIONS DE PERFORMANCES (Leaderboard) ---
+CREATE INDEX idx_goals_scorer ON goals(scorer_id);
+CREATE INDEX idx_match_players_match ON match_players(match_id);
