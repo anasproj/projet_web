@@ -215,42 +215,145 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : POST /matchs ---
-  // Permet à un utilisateur connecté de créer un match/lobby (avec creator_id)
+  // ==========================================
+  // --- SYSTÈME DE LOBBY (SALON D'ATTENTE) ---
+  // ==========================================
+
+  // Fonction utilitaire pour diffuser un rafraîchissement du lobby via WebSocket
+  const broadcastLobbyUpdate = (matchId) => {
+    for (const client of connectedClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: "lobby_updated", matchId }));
+      }
+    }
+  };
+
+  // 1. ROUTE : POST /matchs (Création du salon)
   if (url.pathname === "/matchs" && req.method === "POST") {
     try {
-      // 1. Authentification
       const token = getCookieToken(req);
-      if (!token) {
-        return new Response(JSON.stringify({ error: "Non autorisé (pas de token)" }), { status: 401, headers });
-      }
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
       
-      const jwtKey = await getJwtKey();
-      const payload = await verify(token, jwtKey);
-      const creatorId = payload.userId;
-
-      // 2. Parser le body
+      const payload = await verify(token, await getJwtKey());
       const body = await req.json();
-      const { home_team_id, away_team_id } = body;
+      
+      // On récupère les nouvelles infos (name, rules) en plus des équipes
+      const { name, rules, home_team_id, away_team_id } = body;
 
       if (!home_team_id || !away_team_id) {
-        return new Response(JSON.stringify({ error: "Équipe domicile et équipe extérieur requises" }), { status: 400, headers });
+        return new Response(JSON.stringify({ error: "Équipes requises" }), { status: 400, headers });
       }
 
-      if (parseInt(home_team_id) === parseInt(away_team_id)) {
-        return new Response(JSON.stringify({ error: "L'équipe domicile doit être différente de l'équipe extérieur" }), { status: 400, headers });
-      }
+      const matchName = name || "Match Amical";
+      const matchRules = rules || "Classique";
 
-      // 3. Insérer le match en BDD
+      // Le match est inséré avec le statut 'scheduled' par défaut (en attente)
       const result = await client.queryObject(
-        "INSERT INTO matches (home_team_id, away_team_id, match_date, home_score, away_score, status, creator_id) VALUES ($1, $2, CURRENT_TIMESTAMP, 0, 0, 'live', $3) RETURNING *",
-        [parseInt(home_team_id), parseInt(away_team_id), creatorId]
+        "INSERT INTO matches (name, rules, home_team_id, away_team_id, status, creator_id) VALUES ($1, $2, $3, $4, 'scheduled', $5) RETURNING *",
+        [matchName, matchRules, parseInt(home_team_id), parseInt(away_team_id), payload.userId]
       );
 
-      return new Response(JSON.stringify(result.rows[0]), { status: 201, headers });
+      const newMatch = result.rows[0];
+
+      // Le créateur rejoint automatiquement son propre salon (sans équipe assignée pour le moment)
+      await client.queryObject(
+        "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2)",
+        [newMatch.id, payload.userId]
+      );
+
+      broadcastLobbyUpdate(newMatch.id);
+      return new Response(JSON.stringify(newMatch), { status: 201, headers });
     } catch (error) {
       console.error(error);
-      return new Response(JSON.stringify({ error: "Erreur serveur lors de la création du match" }), { status: 500, headers });
+      return new Response(JSON.stringify({ error: "Erreur création lobby" }), { status: 500, headers });
+    }
+  }
+
+  // Analyse des routes dynamiques pour le Lobby (ex: /matchs/5/join)
+  const pathParts = url.pathname.split("/");
+  const isMatchRoute = pathParts[1] === "matchs" && pathParts.length === 4;
+
+  // 2. ROUTE : POST /matchs/:id/join (Rejoindre un salon)
+  if (isMatchRoute && pathParts[3] === "join" && req.method === "POST") {
+    try {
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+      
+      const payload = await verify(token, await getJwtKey());
+      const matchId = parseInt(pathParts[2]);
+
+      // On insère le joueur avec team_id = NULL (en attente d'assignation)
+      await client.queryObject(
+        "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        [matchId, payload.userId]
+      );
+
+      broadcastLobbyUpdate(matchId);
+      return new Response(JSON.stringify({ message: "Salon rejoint avec succès" }), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur lors de la jonction" }), { status: 500, headers });
+    }
+  }
+
+  // 3. ROUTE : POST /matchs/:id/assign (Le créateur assigne un joueur à une équipe)
+  if (isMatchRoute && pathParts[3] === "assign" && req.method === "POST") {
+    try {
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+      
+      const payload = await verify(token, await getJwtKey());
+      const matchId = parseInt(pathParts[2]);
+      const body = await req.json();
+      const { target_user_id, team_id } = body;
+
+      // Sécurité : Vérifier que celui qui fait la requête est bien le créateur du salon
+      const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
+        return new Response(JSON.stringify({ error: "Seul le créateur peut assigner les équipes" }), { status: 403, headers });
+      }
+
+      // Mise à jour de l'équipe du joueur
+      await client.queryObject(
+        "UPDATE match_players SET team_id = $1 WHERE match_id = $2 AND user_id = $3",
+        [team_id, matchId, target_user_id]
+      );
+
+      broadcastLobbyUpdate(matchId);
+      return new Response(JSON.stringify({ message: "Joueur assigné avec succès" }), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur d'assignation" }), { status: 500, headers });
+    }
+  }
+
+  // 4. ROUTE : POST /matchs/:id/start (Le créateur lance le match)
+  if (isMatchRoute && pathParts[3] === "start" && req.method === "POST") {
+    try {
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+      
+      const payload = await verify(token, await getJwtKey());
+      const matchId = parseInt(pathParts[2]);
+
+      // Sécurité : Vérifier que c'est le créateur
+      const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
+        return new Response(JSON.stringify({ error: "Seul le créateur peut lancer le match" }), { status: 403, headers });
+      }
+
+      // On passe le statut à 'live' et on démarre le chrono
+      await client.queryObject(
+        "UPDATE matches SET status = 'live', started_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [matchId]
+      );
+
+      // On prévient tout le monde que le match commence !
+      broadcastLobbyUpdate(matchId);
+      return new Response(JSON.stringify({ message: "Le match a commencé !" }), { status: 200, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur au lancement du match" }), { status: 500, headers });
     }
   }
 
