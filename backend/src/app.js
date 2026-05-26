@@ -181,7 +181,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       );
 
       // 4. On crée le cookie HttpOnly
-      const cookieHeader = `token=${jwt}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`;
+      const cookieHeader = `token=${jwt}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=86400`;
       
       // On ajoute le cookie à nos headers CORS existants
       const responseHeaders = new Headers(headers);
