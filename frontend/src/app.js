@@ -50,12 +50,20 @@ async function router() {
   // Nettoyer les minuteurs et connexions websockets actifs avant de changer de route
   cleanupLiveSession();
 
+  const username = localStorage.getItem('username');
+  let hash = window.location.hash.replace('#', '') || '/home';
+
+  // SÉCURITÉ : Si l'utilisateur n'est pas connecté, il est forcé de rester sur /login
+  if (!username && hash !== '/login') {
+    window.location.hash = '/login';
+    return;
+  }
+
   // Transition en fondu : on réinitialise la classe d'animation
   app.classList.remove('fade-in');
   void app.offsetWidth; // Force la refonte pour relancer l'animation
   app.classList.add('fade-in');
 
-  const hash = window.location.hash.replace('#', '') || '/home';
   updateNavbar();
   updateNavLinks(hash.startsWith('/match/') ? '/home' : hash);
 
