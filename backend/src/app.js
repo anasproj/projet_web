@@ -358,6 +358,77 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   }
 
 
+
+  // 5. ROUTE : POST /matchs/:id/goal (Le créateur enregistre un but)
+  if (isMatchRoute && pathParts[3] === "goal" && req.method === "POST") {
+    try {
+      // 1. Vérification du token JWT
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+      
+      const payload = await verify(token, await getJwtKey());
+      const matchId = parseInt(pathParts[2]);
+      const body = await req.json();
+      
+      // On récupère les infos envoyées par le frontend
+      const { team_id, scorer_id, assist_id, minute } = body;
+
+      if (!team_id) {
+        return new Response(JSON.stringify({ error: "L'ID de l'équipe (team_id) est requis" }), { status: 400, headers });
+      }
+
+      // 2. Sécurité : Vérifier que c'est bien le créateur du match qui fait la requête
+      const matchCheck = await client.queryObject(
+        "SELECT creator_id, home_team_id, away_team_id, home_score, away_score FROM matches WHERE id = $1", 
+        [matchId]
+      );
+      
+      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
+        return new Response(JSON.stringify({ error: "Seul le créateur peut enregistrer un but" }), { status: 403, headers });
+      }
+
+      const match = matchCheck.rows[0];
+
+      // 3. Ajouter le but dans la table 'goals'
+      await client.queryObject(
+        "INSERT INTO goals (match_id, team_id, scorer_id, assist_id, minute) VALUES ($1, $2, $3, $4, $5)",
+        [matchId, parseInt(team_id), scorer_id || null, assist_id || null, minute || 1]
+      );
+
+      // 4. Mettre à jour le score du match
+      let newHomeScore = match.home_score;
+      let newAwayScore = match.away_score;
+
+      if (parseInt(team_id) === match.home_team_id) {
+        newHomeScore += 1;
+        await client.queryObject("UPDATE matches SET home_score = $1 WHERE id = $2", [newHomeScore, matchId]);
+      } else if (parseInt(team_id) === match.away_team_id) {
+        newAwayScore += 1;
+        await client.queryObject("UPDATE matches SET away_score = $1 WHERE id = $2", [newAwayScore, matchId]);
+      }
+
+      // 5. Diffuser le nouveau score en temps réel à tout le salon via WebSocket !
+      const messageToSend = JSON.stringify({
+        type: "score_update",
+        matchId: matchId,
+        home_score: newHomeScore,
+        away_score: newAwayScore
+      });
+
+      for (const clientWS of connectedClients) {
+        if (clientWS.readyState === WebSocket.OPEN) {
+          clientWS.send(messageToSend);
+        }
+      }
+
+      return new Response(JSON.stringify({ message: "But enregistré avec succès !" }), { status: 201, headers });
+    } catch (error) {
+      console.error(error);
+      return new Response(JSON.stringify({ error: "Erreur lors de l'enregistrement du but" }), { status: 500, headers });
+    }
+  }
+
+
   // --- ROUTE : GET /teams ---
   // Permet de récupérer la liste des équipes depuis la base de données
   if (url.pathname === "/teams" && req.method === "GET") {
