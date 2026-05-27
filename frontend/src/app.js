@@ -176,6 +176,9 @@ async function renderMatchDetails(id) {
     const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
     const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
 
+    const currentUserId = localStorage.getItem('userId');
+    const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
+
     app.innerHTML = `
       <div class="page">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
@@ -188,6 +191,11 @@ async function renderMatchDetails(id) {
         </div>
         
         <div class="card" style="text-align:center; padding: 40px 20px; position:relative;">
+          ${isCreator ? `
+            <span class="creator-badge" style="position:absolute; top:20px; right:20px; background:var(--gold); color:var(--bg-dark); padding:6px 12px; border-radius:20px; font-weight:bold; font-size:0.8rem; display:flex; align-items:center; gap:4px; box-shadow: 0 0 10px rgba(212, 175, 55, 0.3);">
+              🏆 Créateur
+            </span>
+          ` : ''}
           <span class="lobby-badge badge-${match.status === 'live' ? 'live' : match.status === 'finished' ? 'finished' : 'waiting'}" style="margin-bottom:12px; display:inline-block;">${match.status.toUpperCase()}</span>
           
           <div>
@@ -205,9 +213,11 @@ async function renderMatchDetails(id) {
               <h2 style="font-size:1.8rem;">${awayTeam}</h2>
             </div>
           </div>
-          <div style="margin-top: 30px;">
-             <button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Enregistrer un but</button>
-          </div>
+          ${isCreator ? `
+            <div style="margin-top: 30px;">
+               <button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Enregistrer un but</button>
+            </div>
+          ` : ''}
         </div>
         
         <!-- Live Chat Container -->
@@ -380,9 +390,47 @@ function cleanupLiveSession() {
 }
 
 // Logique de la modale
-window.openGoalModal = function (matchId, homeTeamId, awayTeamId) {
+window.openGoalModal = async function (matchId, homeTeamId, awayTeamId) {
   const modal = document.getElementById('goal-modal');
-  document.getElementById('goal-scorer-name').textContent = "Sélection du buteur en cours...";
+  const teamSelect = document.getElementById('goal-team');
+  const scorerSelect = document.getElementById('goal-scorer');
+  const assistSelect = document.getElementById('goal-assist');
+  const minuteInput = document.getElementById('goal-minute');
+  const errorDiv = document.getElementById('goal-error');
+
+  errorDiv.classList.add('hidden');
+  errorDiv.textContent = '';
+
+  // 1. Équipe qui a marqué
+  const homeTeamName = teamsCache[homeTeamId]?.name || "Équipe Domicile";
+  const awayTeamName = teamsCache[awayTeamId]?.name || "Équipe Extérieur";
+  teamSelect.innerHTML = `
+    <option value="${homeTeamId}">${homeTeamName}</option>
+    <option value="${awayTeamId}">${awayTeamName}</option>
+  `;
+
+  // 2. Minute du but (basé sur matchTimer actuel)
+  const currentMinute = Math.max(1, Math.floor(matchTimer / 60) + 1);
+  minuteInput.value = currentMinute;
+
+  // 3. Remplir les sélecteurs de buteur/passeur depuis le leaderboard (tous les utilisateurs)
+  try {
+    const users = await apiFetch('/leaderboard');
+    let optionsHtml = `<option value="">-- Inconnu / Autre (Optionnel) --</option>`;
+    users.forEach(u => {
+      optionsHtml += `<option value="${u.id}">${u.username}</option>`;
+    });
+    scorerSelect.innerHTML = optionsHtml;
+    assistSelect.innerHTML = optionsHtml;
+  } catch (err) {
+    console.error("Erreur chargement joueurs modale but:", err);
+    scorerSelect.innerHTML = `<option value="">-- Erreur de chargement --</option>`;
+    assistSelect.innerHTML = `<option value="">-- Erreur de chargement --</option>`;
+  }
+
+  // Stocker l'ID du match pour confirmation
+  modal.dataset.matchId = matchId;
+
   modal.classList.remove('hidden');
 };
 
@@ -390,9 +438,47 @@ document.getElementById('goal-cancel').addEventListener('click', () => {
   document.getElementById('goal-modal').classList.add('hidden');
 });
 
-document.getElementById('goal-confirm').addEventListener('click', () => {
-  alert("Fonctionnalité d'enregistrement à lier avec l'API (Issue #6)");
-  document.getElementById('goal-modal').classList.add('hidden');
+document.getElementById('goal-confirm').addEventListener('click', async () => {
+  const modal = document.getElementById('goal-modal');
+  const matchId = modal.dataset.matchId;
+  const teamId = document.getElementById('goal-team').value;
+  const scorerId = document.getElementById('goal-scorer').value;
+  const assistId = document.getElementById('goal-assist').value;
+  const minute = document.getElementById('goal-minute').value;
+  const errorDiv = document.getElementById('goal-error');
+
+  errorDiv.classList.add('hidden');
+  errorDiv.textContent = '';
+
+  if (!teamId) {
+    errorDiv.textContent = "L'équipe est requise.";
+    errorDiv.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/matchs/${matchId}/goal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        team_id: teamId,
+        scorer_id: scorerId ? parseInt(scorerId) : null,
+        assist_id: assistId ? parseInt(assistId) : null,
+        minute: minute ? parseInt(minute) : 1
+      }),
+      credentials: 'include'
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Erreur lors de l'enregistrement du but.");
+    }
+
+    modal.classList.add('hidden');
+  } catch (err) {
+    errorDiv.textContent = err.message;
+    errorDiv.classList.remove('hidden');
+  }
 });
 
 // Modale de création de Lobby
