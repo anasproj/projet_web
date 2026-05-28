@@ -689,3 +689,106 @@ button:active, .btn:active {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+/* ===== CLASSEMENT / LEADERBOARD ===== */
+.ranking-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  margin-top: 20px;
+}
+
+.ranking-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.ranking-table th, .ranking-table td {
+  padding: 16px 20px;
+}
+
+.ranking-table th {
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ranking-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: all 0.2s ease;
+}
+
+/* Alternance de lignes (Zebra striping) */
+.ranking-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+/* Animation au survol */
+.ranking-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Médailles & position */
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-weight: 900;
+  font-size: 1.1rem;
+}
+
+.rank-1 {
+  background: rgba(245, 200, 66, 0.15);
+  color: var(--gold);
+  border: 1px solid var(--gold);
+}
+
+.rank-2 {
+  background: rgba(176, 184, 200, 0.15);
+  color: var(--silver);
+  border: 1px solid var(--silver);
+}
+
+.rank-3 {
+  background: rgba(205, 127, 50, 0.15);
+  color: var(--bronze);
+  border: 1px solid var(--bronze);
+}
+
+/* Nom d'utilisateur cliquable */
+.ranking-username {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 700;
+  transition: color 0.2s;
+  display: inline-block;
+}
+
+.ranking-username:hover {
+  color: var(--gold);
+  text-decoration: underline;
+}
+
+/* Note globale (OVR) */
+.ranking-ovr {
+  font-weight: 900;
+  font-size: 1.1rem;
+  color: var(--gold);
+}
+
+/* Colonnes de statistiques */
+.ranking-stat {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+

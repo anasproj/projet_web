@@ -3,6 +3,16 @@ const WS_URL = 'wss://localhost:3000/ws';
 
 const app = document.getElementById('app');
 
+function escapeHtml(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 let teamsCache = {};
 let ws = null;
 let liveMatchId = null;
@@ -553,13 +563,92 @@ document.getElementById('lobby-confirm').addEventListener('click', async () => {
 
 async function renderRanking() {
   app.innerHTML = `
-    <div class="page">
-      <div class="page-header">
-        <h1>Classement</h1>
-        <p class="text-muted">Les meilleurs joueurs de la saison.</p>
-      </div>
-      <p class="text-muted">Disponible bientôt.</p>
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement du classement...</p>
     </div>`;
+
+  try {
+    const leaderboard = await apiFetch('/leaderboard');
+    const players = Array.isArray(leaderboard) ? leaderboard : [];
+
+    const rowsHtml = players.map((p, index) => {
+      const rank = index + 1;
+      let rankDisplay = rank;
+
+      // Médailles graphiques pour le top 3
+      if (rank === 1) {
+        rankDisplay = `<span class="rank-badge rank-1">🥇</span>`;
+      } else if (rank === 2) {
+        rankDisplay = `<span class="rank-badge rank-2">🥈</span>`;
+      } else if (rank === 3) {
+        rankDisplay = `<span class="rank-badge rank-3">🥉</span>`;
+      } else {
+        rankDisplay = `<span class="rank-badge">${rank}</span>`;
+      }
+
+      return `
+        <tr>
+          <td style="width: 80px; text-align: center;">${rankDisplay}</td>
+          <td>
+            <a href="#/profile/${p.id}" class="ranking-username">${escapeHtml(p.username)}</a>
+          </td>
+          <td class="ranking-ovr">${p.overall}</td>
+          <td class="ranking-stat">${p.matches_played}</td>
+          <td class="ranking-stat" style="color: #27ae60;">${p.wins}</td>
+          <td class="ranking-stat">${p.goals}</td>
+          <td class="ranking-stat">${p.assists}</td>
+        </tr>
+      `;
+    }).join('');
+
+    app.innerHTML = `
+      <div class="page fade-in">
+        <div class="page-header">
+          <h1>Classement</h1>
+          <p class="text-muted">Les meilleurs joueurs de la saison d'après leur Note Globale (OVR).</p>
+        </div>
+
+        <div class="ranking-container">
+          <table class="ranking-table">
+            <thead>
+              <tr>
+                <th style="text-align: center;">Pos</th>
+                <th>Joueur</th>
+                <th>OVR</th>
+                <th>Matchs</th>
+                <th>Victoires</th>
+                <th>Buts</th>
+                <th>Passes D.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${players.length === 0 ? `
+                <tr>
+                  <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 40px;">
+                    Aucun joueur classé pour le moment.
+                  </td>
+                </tr>
+              ` : rowsHtml}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    console.error("Erreur chargement classement :", error);
+    app.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1>Classement</h1>
+          <p class="text-muted">Les meilleurs joueurs de la saison.</p>
+        </div>
+        <p class="text-muted" style="color: #e74c3c;">
+          Impossible de charger le classement pour le moment.
+        </p>
+      </div>`;
+  }
 }
 
 function renderFutCard(stats, username) {
