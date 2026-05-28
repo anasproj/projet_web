@@ -48,7 +48,7 @@ services:
     container_name: foot_frontend
     restart: always
     ports:
-      - "8080:80" # Navigable sur http://localhost:8080
+      - "8080:8080" # Navigable sur http://localhost:8080
     volumes:
       - ./frontend/src:/usr/share/nginx/html:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
