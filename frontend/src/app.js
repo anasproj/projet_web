@@ -13,6 +13,17 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
+function parseMatchFields(match) {
+  if (!match) return match;
+  if (typeof match.players === 'string') {
+    try { match.players = JSON.parse(match.players); } catch(e) { match.players = []; }
+  }
+  if (typeof match.goals === 'string') {
+    try { match.goals = JSON.parse(match.goals); } catch(e) { match.goals = []; }
+  }
+  return match;
+}
+
 let teamsCache = {};
 let ws = null;
 let liveMatchId = null;
@@ -128,8 +139,7 @@ async function renderHome() {
     </div>`;
   try {
     await loadTeams();
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data : [];
+    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const username = localStorage.getItem('username');
 
     const cards = matchs.map(m => {
@@ -190,8 +200,7 @@ async function renderMatchDetails(id) {
     </div>`;
   try {
     await loadTeams();
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data : [];
+    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == id);
 
     if (!match) {
@@ -437,8 +446,7 @@ function handleOfflineState() {
 async function refreshLiveMatchUI(matchId) {
   if (!matchId) return;
   try {
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data : [];
+    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == matchId);
     if (!match) return;
 
@@ -583,8 +591,7 @@ function getTimelineHTML(match) {
 async function refreshLobbyUI(matchId) {
   if (!matchId) return;
   try {
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data : [];
+    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == matchId);
     if (!match) return;
 
@@ -636,8 +643,7 @@ window.assignPlayer = async function(playerId, teamId) {
   // Re-render le lobby sans toucher au WS
   try {
     await loadTeams();
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data : [];
+    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == liveMatchId);
     if (match) {
       const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
