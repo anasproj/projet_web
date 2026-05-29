@@ -295,6 +295,11 @@ async function renderMatchDetails(id) {
           ` : ''}
         </div>
 
+        <!-- TIMELINE PANNEAU DE RESUME -->
+        <div id="live-timeline-container" style="margin-top: 25px;">
+          ${getTimelineHTML(match)}
+        </div>
+
         <!-- COMPOSITIONS DES ÉQUIPES -->
         <div style="display: flex; gap: 20px; margin-top: 25px; margin-bottom: 25px; flex-wrap: wrap;">
           <div class="card" style="flex: 1; min-width: 250px; padding: 20px; text-align: left; background: var(--surface-light);">
@@ -329,11 +334,6 @@ async function renderMatchDetails(id) {
               }
             </div>
           </div>
-        </div>
-        
-        <!-- TIMELINE PANNEAU DE RESUME -->
-        <div id="live-timeline-container">
-          ${getTimelineHTML(match)}
         </div>
 
         <!-- Live Chat Container -->
