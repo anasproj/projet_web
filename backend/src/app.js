@@ -208,16 +208,32 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     try {
       const result = await client.queryObject(`
         SELECT m.*,
-          COALESCE(
-            json_agg(
+          (
+            SELECT COALESCE(json_agg(
               json_build_object('user_id', u.id, 'username', u.username, 'team_id', mp.team_id)
-            ) FILTER (WHERE u.id IS NOT NULL),
-            '[]'
-          ) AS players
+            ), '[]')
+            FROM match_players mp
+            JOIN users u ON u.id = mp.user_id
+            WHERE mp.match_id = m.id
+          ) AS players,
+          (
+            SELECT COALESCE(json_agg(
+              json_build_object(
+                'id', g.id,
+                'team_id', g.team_id,
+                'scorer_id', g.scorer_id,
+                'scorer_name', us.username,
+                'assist_id', g.assist_id,
+                'assist_name', ua.username,
+                'minute', g.minute
+              ) ORDER BY g.minute ASC
+            ), '[]')
+            FROM goals g
+            LEFT JOIN users us ON us.id = g.scorer_id
+            LEFT JOIN users ua ON ua.id = g.assist_id
+            WHERE g.match_id = m.id
+          ) AS goals
         FROM matches m
-        LEFT JOIN match_players mp ON mp.match_id = m.id
-        LEFT JOIN users u ON u.id = mp.user_id
-        GROUP BY m.id
         ORDER BY m.id DESC
       `);
       return new Response(JSON.stringify(result.rows), { status: 200, headers });

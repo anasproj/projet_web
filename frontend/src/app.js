@@ -316,7 +316,9 @@ async function renderMatchDetails(id) {
         </div>
         
         <!-- TIMELINE PANNEAU DE RESUME -->
-        ${getTimelineHTML(match)}
+        <div id="live-timeline-container">
+          ${getTimelineHTML(match)}
+        </div>
 
         <!-- Live Chat Container -->
         <div class="chat-container">
@@ -432,12 +434,35 @@ function handleOfflineState() {
   if (usersCount) usersCount.textContent = "Déconnecté";
 }
 
-function handleIncomingRealtimeEvent(data) {
-  if (data.type === "score_update") {
+async function refreshLiveMatchUI(matchId) {
+  if (!matchId) return;
+  try {
+    const data = await apiFetch('/matchs');
+    const matchs = Array.isArray(data) ? data : [];
+    const match = matchs.find(m => m.id == matchId);
+    if (!match) return;
+
+    currentMatchData = match;
+
+    // 1. Mettre à jour le score dans le DOM
     const scoreEl = document.getElementById('live-score');
     if (scoreEl) {
-      scoreEl.textContent = `${data.home_score} - ${data.away_score}`;
+      scoreEl.innerHTML = `${match.home_score} - ${match.away_score}`;
     }
+
+    // 2. Mettre à jour la timeline dans le DOM
+    const timelineContainer = document.getElementById('live-timeline-container');
+    if (timelineContainer) {
+      timelineContainer.innerHTML = getTimelineHTML(match);
+    }
+  } catch (err) {
+    console.error("Erreur refreshLiveMatchUI:", err);
+  }
+}
+
+function handleIncomingRealtimeEvent(data) {
+  if (data.type === "score_update") {
+    refreshLiveMatchUI(liveMatchId);
   } else if (data.type === "new_message") {
     appendChatMessage(data.username, data.text, false, data.time);
   } else if (data.type === "player_joined" || data.type === "team_assigned") {
@@ -525,11 +550,11 @@ function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
 }
 
 function getTimelineHTML(match) {
-  if (mockTimeline.length === 0) return '';
+  const goals = match.goals || [];
+  if (goals.length === 0) return '';
   
-  const eventsHtml = mockTimeline.map(ev => {
-    // Si ev.team = 1 ou home_team_id -> Domicile, sinon Extérieur
-    const isHome = ev.team === match.home_team_id || ev.team === 1;
+  const eventsHtml = goals.map(ev => {
+    const isHome = ev.team_id == match.home_team_id;
     const align = isHome ? 'left' : 'right';
     const teamColor = isHome ? 'var(--primary)' : 'var(--danger)';
     
@@ -537,8 +562,8 @@ function getTimelineHTML(match) {
       <div class="timeline-event" style="align-self: ${isHome ? 'flex-start' : 'flex-end'}; text-align: ${align}; border-${align}: 4px solid ${teamColor};">
         <div class="timeline-minute">${ev.minute}' <span class="timeline-icon">⚽</span></div>
         <div class="timeline-details">
-          <strong>${escapeHtml(ev.player)}</strong>
-          ${ev.assist ? `<div class="timeline-assist">(Passe : ${escapeHtml(ev.assist)})</div>` : ''}
+          <strong>${escapeHtml(ev.scorer_name || 'Joueur')}</strong>
+          ${ev.assist_name ? `<div class="timeline-assist">(Passe : ${escapeHtml(ev.assist_name)})</div>` : ''}
         </div>
       </div>
     `;
