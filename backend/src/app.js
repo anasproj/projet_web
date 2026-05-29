@@ -204,10 +204,22 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
   // --- ROUTE : GET /matchs ---
-  // Permet de récupérer la liste des matchs depuis la base de données
   if (url.pathname === "/matchs" && req.method === "GET") {
     try {
-      const result = await client.queryObject("SELECT * FROM matches");
+      const result = await client.queryObject(`
+        SELECT m.*,
+          COALESCE(
+            json_agg(
+              json_build_object('user_id', u.id, 'username', u.username, 'team_id', mp.team_id)
+            ) FILTER (WHERE u.id IS NOT NULL),
+            '[]'
+          ) AS players
+        FROM matches m
+        LEFT JOIN match_players mp ON mp.match_id = m.id
+        LEFT JOIN users u ON u.id = mp.user_id
+        GROUP BY m.id
+        ORDER BY m.id DESC
+      `);
       return new Response(JSON.stringify(result.rows), { status: 200, headers });
     } catch (error) {
       console.error(error);

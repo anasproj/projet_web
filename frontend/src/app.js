@@ -18,6 +18,7 @@ let ws = null;
 let liveMatchId = null;
 let chronoInterval = null;
 let matchTimer = 0;
+let lobbyJoined = false; // Guard pour n'appeler /join qu'une seule fois par session
 
 // --- MOCK PLAYERS POUR LE LOBBY ---
 let mockLobbyPlayers = [];
@@ -26,6 +27,7 @@ let mockLobbyPlayers = [];
 let mockTimeline = [];
 
 function navigate(path) {
+  lobbyJoined = false; // Réinitialise le guard quand on change de page
   window.location.hash = path;
 }
 
@@ -202,8 +204,14 @@ async function renderMatchDetails(id) {
       }
       
       app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
-      joinLobby(match.id);
-      initRealtimeConnection();
+      // Guard anti-boucle : ne pas recréer un WS déjà ouvert
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        if (!lobbyJoined) {
+          lobbyJoined = true;
+          joinLobby(match.id);
+        }
+        initRealtimeConnection();
+      }
       return;
     }
 
@@ -279,8 +287,10 @@ async function renderMatchDetails(id) {
     matchTimer = match.status === 'live' ? 15 * 60 : 0; // Commence à 15:00 pour la démo
     startChrono();
 
-    // Initialiser la connexion WebSocket
-    initRealtimeConnection();
+    // Initialiser la connexion WebSocket (seulement si pas déjà ouverte)
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      initRealtimeConnection();
+    }
 
   } catch (e) {
     app.innerHTML = `<div class="page"><p>Erreur lors du chargement des détails du match.</p></div>`;
@@ -369,7 +379,11 @@ function handleIncomingRealtimeEvent(data) {
     }
   } else if (data.type === "new_message") {
     appendChatMessage(data.username, data.text, false, data.time);
-  } else if (data.type === "player_joined" || data.type === "team_assigned" || data.type === "match_started") {
+  } else if (data.type === "player_joined" || data.type === "team_assigned") {
+    // Mise à jour légère : pas de reconnexion WS
+    refreshLobbyUI(liveMatchId);
+  } else if (data.type === "match_started") {
+    // Rechargement complet vers la vue du match
     renderMatchDetails(liveMatchId);
   }
 }
@@ -477,6 +491,35 @@ function getTimelineHTML(match) {
       </div>
     </div>
   `;
+}
+
+// Rafraîchit les colonnes du salon sans recréer la connexion WebSocket
+async function refreshLobbyUI(matchId) {
+  if (!matchId) return;
+  try {
+    const data = await apiFetch('/matchs');
+    const matchs = Array.isArray(data) ? data : [];
+    const match = matchs.find(m => m.id == matchId);
+    if (!match) return;
+
+    await loadTeams();
+    const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
+    const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
+    const currentUserId = localStorage.getItem('userId');
+    const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
+
+    if (match.players && Array.isArray(match.players)) {
+      mockLobbyPlayers = match.players.map(p => ({
+        id: p.user_id,
+        username: p.username,
+        team: p.team_id || null
+      }));
+    }
+
+    app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+  } catch(e) {
+    console.error("Erreur refreshLobbyUI:", e);
+  }
 }
 
 async function joinLobby(matchId) {
