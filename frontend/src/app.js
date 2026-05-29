@@ -202,8 +202,11 @@ async function renderMatchDetails(id) {
       }
       
       app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
-      joinLobby(match.id);
-      initRealtimeConnection();
+      // On ne lance joinLobby/initRealtimeConnection que si le WS n'est pas déjà ouvert
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        joinLobby(match.id);
+        initRealtimeConnection();
+      }
       return;
     }
 
@@ -369,7 +372,11 @@ function handleIncomingRealtimeEvent(data) {
     }
   } else if (data.type === "new_message") {
     appendChatMessage(data.username, data.text, false, data.time);
-  } else if (data.type === "player_joined" || data.type === "team_assigned" || data.type === "match_started") {
+  } else if (data.type === "player_joined" || data.type === "team_assigned") {
+    // Mise à jour légère : ne pas recharger toute la page, juste re-render le lobby
+    refreshLobbyUI(liveMatchId);
+  } else if (data.type === "match_started") {
+    // Rechargement complet vers la vue du match en direct
     renderMatchDetails(liveMatchId);
   }
 }
@@ -477,6 +484,37 @@ function getTimelineHTML(match) {
       </div>
     </div>
   `;
+}
+
+// Rafraîchit les colonnes du salon sans recréer la connexion WebSocket
+async function refreshLobbyUI(matchId) {
+  if (!matchId) return;
+  try {
+    const data = await apiFetch('/matchs');
+    const matchs = Array.isArray(data) ? data : [];
+    const match = matchs.find(m => m.id == matchId);
+    if (!match) return;
+
+    await loadTeams();
+    const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
+    const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
+    const currentUserId = localStorage.getItem('userId');
+    const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
+
+    // Mise à jour des joueurs depuis les données du serveur si disponibles
+    if (match.players && Array.isArray(match.players)) {
+      mockLobbyPlayers = match.players.map(p => ({
+        id: p.user_id,
+        username: p.username,
+        team: p.team_id || null
+      }));
+    }
+
+    // Re-render uniquement le HTML du lobby
+    app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+  } catch(e) {
+    console.error("Erreur refreshLobbyUI:", e);
+  }
 }
 
 async function joinLobby(matchId) {
