@@ -220,10 +220,11 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   // ==========================================
 
   // Fonction utilitaire pour diffuser un rafraîchissement du lobby via WebSocket
-  const broadcastLobbyUpdate = (matchId) => {
+  // Fonction utilitaire pour diffuser un rafraîchissement du lobby via WebSocket avec un type spécifique
+  const broadcastLobbyUpdate = (matchId, eventType = "lobby_updated") => {
     for (const client of connectedClients) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "lobby_updated", matchId }));
+        client.send(JSON.stringify({ type: eventType, matchId }));
       }
     }
   };
@@ -237,9 +238,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const payload = await verify(token, await getJwtKey());
       const body = await req.json();
       
-      // On récupère les nouvelles infos (name, rules) en plus des équipes
       const { name, rules, home_team_id, away_team_id } = body;
-
       if (!home_team_id || !away_team_id) {
         return new Response(JSON.stringify({ error: "Équipes requises" }), { status: 400, headers });
       }
@@ -247,21 +246,19 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const matchName = name || "Match Amical";
       const matchRules = rules || "Classique";
 
-      // Le match est inséré avec le statut 'scheduled' par défaut (en attente)
       const result = await client.queryObject(
         "INSERT INTO matches (name, rules, home_team_id, away_team_id, status, creator_id, match_date) VALUES ($1, $2, $3, $4, 'scheduled', $5, NOW()) RETURNING *",
         [matchName, matchRules, parseInt(home_team_id), parseInt(away_team_id), payload.userId]
       );
-
+      
       const newMatch = result.rows[0];
 
-      // Le créateur rejoint automatiquement son propre salon (sans équipe assignée pour le moment)
       await client.queryObject(
         "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2)",
         [newMatch.id, payload.userId]
       );
 
-      broadcastLobbyUpdate(newMatch.id);
+      broadcastLobbyUpdate(newMatch.id, "player_joined");
       return new Response(JSON.stringify(newMatch), { status: 201, headers });
     } catch (error) {
       console.error(error);
@@ -271,9 +268,10 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
   // Analyse des routes dynamiques pour le Lobby (ex: /matchs/5/join)
   const pathParts = url.pathname.split("/");
-  const isMatchRoute = pathParts[1] === "matchs" && pathParts.length === 4;
+  // CORRECTION : On autorise 'matchs' ET 'matches' pour être compatible avec le Frontend
+  const isMatchRoute = (pathParts[1] === "matchs" || pathParts[1] === "matches") && pathParts.length === 4;
 
-  // 2. ROUTE : POST /matchs/:id/join (Rejoindre un salon)
+  // 2. ROUTE : POST /matches/:id/join (Rejoindre un salon)
   if (isMatchRoute && pathParts[3] === "join" && req.method === "POST") {
     try {
       const token = getCookieToken(req);
@@ -282,13 +280,13 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const payload = await verify(token, await getJwtKey());
       const matchId = parseInt(pathParts[2]);
 
-      // On insère le joueur avec team_id = NULL (en attente d'assignation)
       await client.queryObject(
         "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         [matchId, payload.userId]
       );
 
-      broadcastLobbyUpdate(matchId);
+      // DIFFUSION WEBSOCKET SPÉCIFIQUE
+      broadcastLobbyUpdate(matchId, "player_joined");
       return new Response(JSON.stringify({ message: "Salon rejoint avec succès" }), { status: 200, headers });
     } catch (error) {
       console.error(error);
@@ -296,7 +294,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // 3. ROUTE : POST /matchs/:id/assign (Le créateur assigne un joueur à une équipe)
+  // 3. ROUTE : POST /matches/:id/assign (Le créateur assigne un joueur à une équipe)
   if (isMatchRoute && pathParts[3] === "assign" && req.method === "POST") {
     try {
       const token = getCookieToken(req);
@@ -304,22 +302,25 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       
       const payload = await verify(token, await getJwtKey());
       const matchId = parseInt(pathParts[2]);
+      
       const body = await req.json();
-      const { target_user_id, team_id } = body;
+      // CORRECTION : Le frontend envoie userId et non target_user_id
+      const targetUserId = body.userId || body.target_user_id; 
+      const teamId = body.teamId || body.team_id;
 
-      // Sécurité : Vérifier que celui qui fait la requête est bien le créateur du salon
       const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      
       if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
         return new Response(JSON.stringify({ error: "Seul le créateur peut assigner les équipes" }), { status: 403, headers });
       }
 
-      // Mise à jour de l'équipe du joueur
       await client.queryObject(
         "UPDATE match_players SET team_id = $1 WHERE match_id = $2 AND user_id = $3",
-        [team_id, matchId, target_user_id]
+        [teamId, matchId, targetUserId]
       );
 
-      broadcastLobbyUpdate(matchId);
+      // DIFFUSION WEBSOCKET SPÉCIFIQUE
+      broadcastLobbyUpdate(matchId, "team_assigned");
       return new Response(JSON.stringify({ message: "Joueur assigné avec succès" }), { status: 200, headers });
     } catch (error) {
       console.error(error);
@@ -327,7 +328,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // 4. ROUTE : POST /matchs/:id/start (Le créateur lance le match)
+  // 4. ROUTE : POST /matches/:id/start (Le créateur lance le match)
   if (isMatchRoute && pathParts[3] === "start" && req.method === "POST") {
     try {
       const token = getCookieToken(req);
@@ -336,20 +337,19 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const payload = await verify(token, await getJwtKey());
       const matchId = parseInt(pathParts[2]);
 
-      // Sécurité : Vérifier que c'est le créateur
       const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      
       if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
         return new Response(JSON.stringify({ error: "Seul le créateur peut lancer le match" }), { status: 403, headers });
       }
 
-      // On passe le statut à 'live' et on démarre le chrono
       await client.queryObject(
         "UPDATE matches SET status = 'live', started_at = CURRENT_TIMESTAMP WHERE id = $1",
         [matchId]
       );
 
-      // On prévient tout le monde que le match commence !
-      broadcastLobbyUpdate(matchId);
+      // DIFFUSION WEBSOCKET SPÉCIFIQUE
+      broadcastLobbyUpdate(matchId, "match_started");
       return new Response(JSON.stringify({ message: "Le match a commencé !" }), { status: 200, headers });
     } catch (error) {
       console.error(error);
