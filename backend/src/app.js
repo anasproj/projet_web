@@ -427,18 +427,25 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
         away_score: newAwayScore
       });
 
-      // --- NOUVEAUTÉ : Annonce du buteur dans le chat en direct ---
+      // --- NOUVEAUTÉ : Annonce du buteur et passeur dans le chat en direct ---
       let scorerName = "Un joueur";
       if (scorer_id) {
         const userRes = await client.queryObject("SELECT username FROM users WHERE id = $1", [scorer_id]);
         if (userRes.rows.length > 0) scorerName = userRes.rows[0].username;
       }
+
+      let assistName = "";
+      if (assist_id) {
+        const assistRes = await client.queryObject("SELECT username FROM users WHERE id = $1", [assist_id]);
+        if (assistRes.rows.length > 0) assistName = assistRes.rows[0].username;
+      }
       
       const teamName = parseInt(team_id) === match.home_team_id ? "l'équipe Domicile" : "l'équipe Extérieur";
+      const assistText = assistName ? ` (passe décisive de ${assistName})` : "";
       const chatAnnouncement = JSON.stringify({
         type: "new_message",
         username: "Système",
-        text: `⚽ BUUUUT pour ${teamName} ! Buteur : ${scorerName} (${minute}')`
+        text: `⚽ BUUUUT pour ${teamName} ! Buteur : ${scorerName}${assistText} (${minute}')`
       });
 
       // On diffuse le score ET le message à tout le monde

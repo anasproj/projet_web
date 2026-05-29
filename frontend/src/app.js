@@ -19,6 +19,7 @@ let liveMatchId = null;
 let chronoInterval = null;
 let matchTimer = 0;
 let lobbyJoined = false; // Guard pour n'appeler /join qu'une seule fois par session
+let currentMatchData = null;
 
 // --- MOCK PLAYERS POUR LE LOBBY ---
 let mockLobbyPlayers = [];
@@ -199,6 +200,7 @@ async function renderMatchDetails(id) {
     }
 
     liveMatchId = match.id;
+    currentMatchData = match;
     const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
     const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
 
@@ -701,81 +703,266 @@ function cleanupLiveSession() {
 }
 
 // Logique de la modale
-window.openGoalModal = async function (matchId, homeTeamId, awayTeamId) {
-  const modal = document.getElementById('goal-modal');
-  const teamSelect = document.getElementById('goal-team');
-  const scorerSelect = document.getElementById('goal-scorer');
-  const assistSelect = document.getElementById('goal-assist');
-  const minuteInput = document.getElementById('goal-minute');
-  const errorDiv = document.getElementById('goal-error');
-
-  errorDiv.classList.add('hidden');
-  errorDiv.textContent = '';
-
-  // 1. Équipe qui a marqué
-  const homeTeamName = teamsCache[homeTeamId]?.name || "Équipe Domicile";
-  const awayTeamName = teamsCache[awayTeamId]?.name || "Équipe Extérieur";
-  teamSelect.innerHTML = `
-    <option value="${homeTeamId}">${homeTeamName}</option>
-    <option value="${awayTeamId}">${awayTeamName}</option>
-  `;
-
-  // 2. Minute du but (basé sur matchTimer actuel)
-  const currentMinute = Math.max(1, Math.floor(matchTimer / 60) + 1);
-  minuteInput.value = currentMinute;
-
-  // 3. Remplir les sélecteurs de buteur/passeur depuis le leaderboard (tous les utilisateurs)
-  try {
-    const users = await apiFetch('/leaderboard');
-    let optionsHtml = `<option value="">-- Inconnu / Autre (Optionnel) --</option>`;
-    users.forEach(u => {
-      optionsHtml += `<option value="${u.id}">${u.username}</option>`;
-    });
-    scorerSelect.innerHTML = optionsHtml;
-    assistSelect.innerHTML = optionsHtml;
-  } catch (err) {
-    console.error("Erreur chargement joueurs modale but:", err);
-    scorerSelect.innerHTML = `<option value="">-- Erreur de chargement --</option>`;
-    assistSelect.innerHTML = `<option value="">-- Erreur de chargement --</option>`;
-  }
-
-  // Stocker l'ID du match pour confirmation
-  modal.dataset.matchId = matchId;
-
-  modal.classList.remove('hidden');
+// Logique de la modale par étapes dynamiques
+let goalState = {
+  matchId: null,
+  homeTeamId: null,
+  awayTeamId: null,
+  scorerId: null,
+  scorerUsername: '',
+  scorerTeamId: null,
+  assistId: null,
+  assistUsername: '',
+  minute: 1
 };
 
-document.getElementById('goal-cancel').addEventListener('click', () => {
-  document.getElementById('goal-modal').classList.add('hidden');
-});
+window.openGoalModal = function (matchId, homeTeamId, awayTeamId) {
+  goalState = {
+    matchId,
+    homeTeamId,
+    awayTeamId,
+    scorerId: null,
+    scorerUsername: '',
+    scorerTeamId: null,
+    assistId: null,
+    assistUsername: '',
+    minute: Math.max(1, Math.floor(matchTimer / 60) + 1)
+  };
+  document.getElementById('goal-modal').classList.remove('hidden');
+  renderGoalStep1();
+};
 
-document.getElementById('goal-confirm').addEventListener('click', async () => {
-  const modal = document.getElementById('goal-modal');
-  const matchId = modal.dataset.matchId;
-  const teamId = document.getElementById('goal-team').value;
-  const scorerId = document.getElementById('goal-scorer').value;
-  const assistId = document.getElementById('goal-assist').value;
-  const minute = document.getElementById('goal-minute').value;
+function renderGoalStep1() {
+  const content = document.getElementById('goal-modal-content');
+  const homeTeamName = teamsCache[goalState.homeTeamId]?.name || "Équipe Domicile";
+  const awayTeamName = teamsCache[goalState.awayTeamId]?.name || "Équipe Extérieur";
+
+  const players = currentMatchData?.players || [];
+  const homePlayers = players.filter(p => p.team_id == goalState.homeTeamId);
+  const awayPlayers = players.filter(p => p.team_id == goalState.awayTeamId);
+
+  let playersHtml = '';
+  if (players.length === 0) {
+    playersHtml = `
+      <p class="text-muted" style="width: 100%; text-align: center; font-style: italic;">
+        Aucun joueur assigné dans les équipes. Veuillez sélectionner parmi les membres :
+      </p>
+      <div style="width: 100%; display: flex; flex-direction: column; gap: 8px;">
+        <select id="fallback-scorer-select" class="form-input" style="width:100%;">
+          <option value="">-- Sélectionner le buteur --</option>
+        </select>
+        <div style="margin-top: 10px;">
+          <label class="modal-label" style="display:block; margin-bottom:6px;">Équipe du buteur :</label>
+          <select id="fallback-team-select" class="form-input" style="width:100%;">
+            <option value="${goalState.homeTeamId}">${homeTeamName}</option>
+            <option value="${goalState.awayTeamId}">${awayTeamName}</option>
+          </select>
+        </div>
+      </div>
+    `;
+    apiFetch('/leaderboard').then(users => {
+      const select = document.getElementById('fallback-scorer-select');
+      if (select) {
+        users.forEach(u => {
+          const opt = document.createElement('option');
+          opt.value = u.id;
+          opt.textContent = u.username;
+          select.appendChild(opt);
+        });
+        select.addEventListener('change', (e) => {
+          const opt = select.options[select.selectedIndex];
+          const teamSel = document.getElementById('fallback-team-select');
+          if (opt && opt.value) {
+            goalState.scorerId = parseInt(opt.value);
+            goalState.scorerUsername = opt.textContent;
+            goalState.scorerTeamId = parseInt(teamSel.value);
+            renderGoalStep2();
+          }
+        });
+      }
+    });
+  } else {
+    playersHtml = `
+      <div style="flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 10px;">
+        <h4 style="color: var(--primary); margin: 0 0 4px 0; font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 6px;">🏠 ${homeTeamName}</h4>
+        <div style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+          ${homePlayers.map(p => `
+            <button class="btn btn-outline" style="text-align: left; padding: 10px; display: flex; align-items: center; gap: 8px; width: 100%;" onclick="selectScorer(${p.user_id}, '${escapeHtml(p.username)}', ${goalState.homeTeamId})">
+              <div class="player-avatar" style="width: 24px; height: 24px; font-size: 0.75rem; line-height: 24px; background: var(--primary); color: white; border-radius: 50%; font-weight: bold; text-align: center;">${p.username.charAt(0).toUpperCase()}</div>
+              <span style="font-weight: 600;">${escapeHtml(p.username)}</span>
+            </button>
+          `).join('')}
+          ${homePlayers.length === 0 ? '<p class="text-muted" style="font-size:0.85rem; font-style:italic;">Vide</p>' : ''}
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 10px;">
+        <h4 style="color: var(--danger); margin: 0 0 4px 0; font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 6px;">✈️ ${awayTeamName}</h4>
+        <div style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+          ${awayPlayers.map(p => `
+            <button class="btn btn-outline" style="text-align: left; padding: 10px; display: flex; align-items: center; gap: 8px; width: 100%;" onclick="selectScorer(${p.user_id}, '${escapeHtml(p.username)}', ${goalState.awayTeamId})">
+              <div class="player-avatar" style="width: 24px; height: 24px; font-size: 0.75rem; line-height: 24px; background: var(--danger); color: white; border-radius: 50%; font-weight: bold; text-align: center;">${p.username.charAt(0).toUpperCase()}</div>
+              <span style="font-weight: 600;">${escapeHtml(p.username)}</span>
+            </button>
+          `).join('')}
+          ${awayPlayers.length === 0 ? '<p class="text-muted" style="font-size:0.85rem; font-style:italic;">Vide</p>' : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  content.innerHTML = `
+    <h3 class="modal-title">⚽ Choisir le buteur</h3>
+    <p class="modal-subtitle">Sélectionnez le joueur qui a marqué le but.</p>
+    
+    <div class="modal-section" style="display: flex; gap: 16px; flex-wrap: wrap; margin-top: 15px; margin-bottom: 20px;">
+      ${playersHtml}
+    </div>
+
+    <div class="modal-actions" style="margin-top: 20px;">
+      <button class="btn btn-outline" onclick="closeGoalModal()">Annuler</button>
+    </div>
+  `;
+}
+
+window.selectScorer = function(id, username, teamId) {
+  goalState.scorerId = id;
+  goalState.scorerUsername = username;
+  goalState.scorerTeamId = teamId;
+  renderGoalStep2();
+};
+
+function renderGoalStep2() {
+  const content = document.getElementById('goal-modal-content');
+  const scorerTeamName = teamsCache[goalState.scorerTeamId]?.name || "l'équipe";
+  
+  const players = currentMatchData?.players || [];
+  const teamPlayers = players.filter(p => p.team_id == goalState.scorerTeamId && p.user_id != goalState.scorerId);
+
+  let playersHtml = '';
+  if (players.length === 0) {
+    playersHtml = `
+      <p class="text-muted" style="width: 100%; text-align: center; font-style: italic; margin-bottom: 12px;">
+        Sélectionner le passeur décisif de <strong>${escapeHtml(scorerTeamName)}</strong> :
+      </p>
+      <div style="width: 100%; display: flex; flex-direction: column; gap: 8px;">
+        <select id="fallback-assist-select" class="form-input" style="width:100%;">
+          <option value="">-- Aucun passeur --</option>
+        </select>
+      </div>
+    `;
+    apiFetch('/leaderboard').then(users => {
+      const select = document.getElementById('fallback-assist-select');
+      if (select) {
+        users.forEach(u => {
+          if (u.id != goalState.scorerId) {
+            const opt = document.createElement('option');
+            opt.value = u.id;
+            opt.textContent = u.username;
+            select.appendChild(opt);
+          }
+        });
+        select.addEventListener('change', (e) => {
+          const opt = select.options[select.selectedIndex];
+          if (opt && opt.value) {
+            goalState.assistId = parseInt(opt.value);
+            goalState.assistUsername = opt.textContent;
+          } else {
+            goalState.assistId = null;
+            goalState.assistUsername = '';
+          }
+          renderGoalStep3();
+        });
+      }
+    });
+  } else {
+    playersHtml = `
+      <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; max-height: 250px; overflow-y: auto;">
+        ${teamPlayers.map(p => `
+          <button class="btn btn-outline" style="text-align: left; padding: 10px; display: flex; align-items: center; gap: 8px; width: 100%;" onclick="selectAssist(${p.user_id}, '${escapeHtml(p.username)}')">
+            <div class="player-avatar" style="width: 24px; height: 24px; font-size: 0.75rem; line-height: 24px; background: ${goalState.scorerTeamId == goalState.homeTeamId ? 'var(--primary)' : 'var(--danger)'}; color: white; border-radius: 50%; font-weight: bold; text-align: center;">${p.username.charAt(0).toUpperCase()}</div>
+            <span style="font-weight: 600;">${escapeHtml(p.username)}</span>
+          </button>
+        `).join('')}
+        ${teamPlayers.length === 0 ? '<p class="text-muted" style="text-align: center; font-style: italic;">Aucun autre joueur dans cette équipe pour une passe.</p>' : ''}
+      </div>
+    `;
+  }
+
+  content.innerHTML = `
+    <h3 class="modal-title">👟 Choisir le passeur</h3>
+    <p class="modal-subtitle">Sélectionnez le joueur de <strong>${escapeHtml(scorerTeamName)}</strong> auteur de la passe.</p>
+    
+    <div class="modal-section" style="margin-top: 15px; margin-bottom: 20px;">
+      ${playersHtml}
+    </div>
+
+    <div class="modal-actions" style="margin-top: 20px; display: flex; gap: 10px;">
+      <button class="btn btn-success" style="flex: 1;" onclick="selectAssist(null, '')">Pas de passeur</button>
+      <button class="btn btn-outline" onclick="renderGoalStep1()">Retour</button>
+    </div>
+  `;
+}
+
+window.selectAssist = function(id, username) {
+  goalState.assistId = id;
+  goalState.assistUsername = username;
+  renderGoalStep3();
+};
+
+function renderGoalStep3() {
+  const content = document.getElementById('goal-modal-content');
+  const scorerTeamName = teamsCache[goalState.scorerTeamId]?.name || "l'équipe";
+  
+  content.innerHTML = `
+    <h3 class="modal-title">📝 Confirmer le but</h3>
+    <p class="modal-subtitle">Vérifiez les détails avant de valider.</p>
+    
+    <div class="modal-section" style="display:flex; flex-direction:column; gap:16px; margin-top: 15px; margin-bottom: 20px; text-align: left; background: var(--surface-light); padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
+      <div style="color: white; font-size: 1.05rem;">
+        ⚽ But pour <strong>${escapeHtml(scorerTeamName)}</strong> marqué par : 
+        <span style="color: var(--gold); font-weight: bold;">${escapeHtml(goalState.scorerUsername)}</span>
+      </div>
+      
+      <div style="color: white; font-size: 1.05rem;">
+        👟 Passe décisive : 
+        <span style="color: var(--gold); font-weight: bold;">${goalState.assistUsername ? escapeHtml(goalState.assistUsername) : 'Aucune'}</span>
+      </div>
+
+      <div style="margin-top: 10px;">
+        <label class="modal-label" style="display: block; margin-bottom: 6px;">Minute du but :</label>
+        <input id="goal-minute" type="number" min="1" max="120" class="form-input" style="width:100%; box-sizing:border-box;" value="${goalState.minute}" required />
+      </div>
+
+      <div id="goal-error" class="auth-message error hidden" style="margin-top:0;"></div>
+    </div>
+
+    <div class="modal-actions" style="margin-top: 20px; display: flex; gap: 10px;">
+      <button class="btn btn-success" style="flex: 1;" onclick="confirmGoal()">Confirmer le but</button>
+      <button class="btn btn-outline" onclick="renderGoalStep2()">Retour</button>
+    </div>
+  `;
+}
+
+window.closeGoalModal = function() {
+  document.getElementById('goal-modal').classList.add('hidden');
+};
+
+window.confirmGoal = async function() {
   const errorDiv = document.getElementById('goal-error');
+  const minute = document.getElementById('goal-minute').value || goalState.minute;
 
   errorDiv.classList.add('hidden');
   errorDiv.textContent = '';
 
-  if (!teamId) {
-    errorDiv.textContent = "L'équipe est requise.";
-    errorDiv.classList.remove('hidden');
-    return;
-  }
-
   try {
-    const res = await fetch(`${API}/matchs/${matchId}/goal`, {
+    const res = await fetch(`${API}/matchs/${goalState.matchId}/goal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        team_id: teamId,
-        scorer_id: scorerId ? parseInt(scorerId) : null,
-        assist_id: assistId ? parseInt(assistId) : null,
-        minute: minute ? parseInt(minute) : 1
+        team_id: goalState.scorerTeamId,
+        scorer_id: goalState.scorerId,
+        assist_id: goalState.assistId,
+        minute: parseInt(minute)
       }),
       credentials: 'include'
     });
@@ -785,12 +972,12 @@ document.getElementById('goal-confirm').addEventListener('click', async () => {
       throw new Error(data.error || "Erreur lors de l'enregistrement du but.");
     }
 
-    modal.classList.add('hidden');
+    closeGoalModal();
   } catch (err) {
     errorDiv.textContent = err.message;
     errorDiv.classList.remove('hidden');
   }
-});
+};
 
 // Modale de création de Lobby
 window.openCreateLobbyModal = function () {
