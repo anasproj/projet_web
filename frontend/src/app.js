@@ -19,6 +19,12 @@ let liveMatchId = null;
 let chronoInterval = null;
 let matchTimer = 0;
 
+// --- MOCK PLAYERS POUR LE LOBBY ---
+let mockLobbyPlayers = [];
+
+// --- MOCK TIMELINE POUR LE LIVE ---
+let mockTimeline = [];
+
 function navigate(path) {
   window.location.hash = path;
 }
@@ -93,8 +99,8 @@ async function router() {
   }
 }
 
-async function apiFetch(endpoint) {
-  const res = await fetch(`${API}${endpoint}`, { credentials: 'include' });
+async function apiFetch(endpoint, options = {}) {
+  const res = await fetch(`${API}${endpoint}`, { credentials: 'include', ...options });
   if (!res.ok) throw new Error(`Erreur API : ${res.status}`);
   return res.json();
 }
@@ -189,6 +195,18 @@ async function renderMatchDetails(id) {
     const currentUserId = localStorage.getItem('userId');
     const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
 
+    if (match.status === 'waiting') {
+      const currentUsername = localStorage.getItem('username');
+      if (currentUsername && !mockLobbyPlayers.find(p => p.username === currentUsername)) {
+        mockLobbyPlayers.push({ id: parseInt(currentUserId || 999), username: currentUsername, team: null });
+      }
+      
+      app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+      joinLobby(match.id);
+      initRealtimeConnection();
+      return;
+    }
+
     app.innerHTML = `
       <div class="page">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
@@ -230,6 +248,9 @@ async function renderMatchDetails(id) {
           ` : ''}
         </div>
         
+        <!-- TIMELINE PANNEAU DE RESUME -->
+        ${getTimelineHTML(match)}
+
         <!-- Live Chat Container -->
         <div class="chat-container">
           <div class="chat-header">
@@ -348,8 +369,140 @@ function handleIncomingRealtimeEvent(data) {
     }
   } else if (data.type === "new_message") {
     appendChatMessage(data.username, data.text, false, data.time);
+  } else if (data.type === "player_joined" || data.type === "team_assigned" || data.type === "match_started") {
+    renderMatchDetails(liveMatchId);
   }
 }
+
+// ==========================================
+// FONCTIONS DU SALON D'ATTENTE (LOBBY)
+// ==========================================
+
+function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
+  const homePlayers = mockLobbyPlayers.filter(p => p.team === match.home_team_id);
+  const awayPlayers = mockLobbyPlayers.filter(p => p.team === match.away_team_id);
+  const unassignedPlayers = mockLobbyPlayers.filter(p => !p.team);
+
+  const renderPlayerCard = (p, showAssignButtons) => `
+    <div class="player-card">
+      <div class="player-info">
+        <div class="player-avatar">${p.username.charAt(0).toUpperCase()}</div>
+        <span style="color:white; font-weight:600;">${escapeHtml(p.username)}</span>
+      </div>
+      ${showAssignButtons && isCreator ? `
+        <div class="assign-actions">
+          <button class="btn-assign home" onclick="assignPlayer(${p.id}, ${match.home_team_id})">🏠 Domicile</button>
+          <button class="btn-assign away" onclick="assignPlayer(${p.id}, ${match.away_team_id})">✈️ Extérieur</button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  return `
+    <div class="page">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+        <div class="status-indicator">
+          <span id="live-status-dot" class="status-dot"></span>
+          <span id="live-status-text" class="text-muted">Connexion...</span>
+        </div>
+      </div>
+      
+      <div class="lobby-container">
+        <div class="lobby-header">
+          <span class="lobby-badge badge-waiting" style="margin-bottom:15px; display:inline-block;">EN ATTENTE</span>
+          <h2>Salon d'attente</h2>
+          <p class="text-muted">Les équipes se mettent en place...</p>
+        </div>
+
+        <div class="lobby-columns">
+          <div class="team-column home-team">
+            <h3 class="team-title">🏠 ${homeTeam}</h3>
+            ${homePlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : homePlayers.map(p => renderPlayerCard(p, false)).join('')}
+          </div>
+
+          <div class="team-column unassigned">
+            <h3 class="team-title">⏳ En attente</h3>
+            ${unassignedPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : unassignedPlayers.map(p => renderPlayerCard(p, true)).join('')}
+          </div>
+
+          <div class="team-column away-team">
+            <h3 class="team-title">✈️ ${awayTeam}</h3>
+            ${awayPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : awayPlayers.map(p => renderPlayerCard(p, false)).join('')}
+          </div>
+        </div>
+
+        <div class="lobby-footer">
+          ${isCreator ? `
+            <button class="btn btn-success" style="font-size:1.2rem; padding:15px 40px; box-shadow:0 0 15px rgba(39,174,96,0.4);" onclick="startMatch(${match.id})">🚀 Lancer le match</button>
+          ` : `
+            <p class="waiting-text">En attente du créateur pour lancer le match...</p>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function getTimelineHTML(match) {
+  if (mockTimeline.length === 0) return '';
+  
+  const eventsHtml = mockTimeline.map(ev => {
+    // Si ev.team = 1 ou home_team_id -> Domicile, sinon Extérieur
+    const isHome = ev.team === match.home_team_id || ev.team === 1;
+    const align = isHome ? 'left' : 'right';
+    const teamColor = isHome ? 'var(--primary)' : 'var(--danger)';
+    
+    return `
+      <div class="timeline-event" style="align-self: ${isHome ? 'flex-start' : 'flex-end'}; text-align: ${align}; border-${align}: 4px solid ${teamColor};">
+        <div class="timeline-minute">${ev.minute}' <span class="timeline-icon">⚽</span></div>
+        <div class="timeline-details">
+          <strong>${escapeHtml(ev.player)}</strong>
+          ${ev.assist ? `<div class="timeline-assist">(Passe : ${escapeHtml(ev.assist)})</div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="match-summary-panel">
+      <h3 style="text-align:center; font-size:1.3rem; margin-bottom:15px; color:var(--gold);">Résumé du match</h3>
+      <div class="timeline-container">
+        ${eventsHtml}
+      </div>
+    </div>
+  `;
+}
+
+async function joinLobby(matchId) {
+  try {
+    await apiFetch(`/matches/${matchId}/join`, { method: 'POST' });
+  } catch(e) { console.log("L'API /join n'est pas encore prête !"); }
+}
+
+window.assignPlayer = async function(playerId, teamId) {
+  const p = mockLobbyPlayers.find(pl => pl.id === playerId);
+  if (p) p.team = teamId;
+  renderMatchDetails(liveMatchId);
+
+  try {
+    await apiFetch(`/matches/${liveMatchId}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ userId: playerId, teamId: teamId })
+    });
+  } catch(e) { console.log("L'API /assign n'est pas encore prête !"); }
+};
+
+window.startMatch = async function(matchId) {
+  try {
+    await apiFetch(`/matches/${matchId}/start`, { method: 'POST' });
+  } catch(e) { 
+    console.log("L'API /start n'est pas encore prête !"); 
+  }
+  // MOCK TEMPORAIRE POUR TESTER L'UI SI L'API PLANTE
+  alert("Simulation: Le match est lancé !");
+  window.location.hash = '/home';
+};
 
 function appendChatMessage(username, text, isOutgoing = false, time = null) {
   const container = document.getElementById('chat-messages');
@@ -494,23 +647,13 @@ document.getElementById('goal-confirm').addEventListener('click', async () => {
 // Modale de création de Lobby
 window.openCreateLobbyModal = function () {
   const modal = document.getElementById('lobby-modal');
-  const homeSelect = document.getElementById('lobby-home-team');
-  const awaySelect = document.getElementById('lobby-away-team');
+  const nameInput = document.getElementById('lobby-name');
   const errorDiv = document.getElementById('lobby-error');
 
   errorDiv.classList.add('hidden');
   errorDiv.textContent = '';
-
-  const options = Object.values(teamsCache)
-    .map(team => `<option value="${team.id}">${team.name}</option>`)
-    .join('');
-
-  homeSelect.innerHTML = options;
-  awaySelect.innerHTML = options;
-
-  if (homeSelect.options.length > 1) {
-    awaySelect.selectedIndex = 1;
-  }
+  
+  if(nameInput) nameInput.value = '';
 
   modal.classList.remove('hidden');
 };
@@ -520,30 +663,27 @@ document.getElementById('lobby-cancel').addEventListener('click', () => {
 });
 
 document.getElementById('lobby-confirm').addEventListener('click', async () => {
-  const homeTeamId = document.getElementById('lobby-home-team').value;
-  const awayTeamId = document.getElementById('lobby-away-team').value;
+  const name = document.getElementById('lobby-name').value || "Match Amical";
+  const rules = "Classique";
+  const duration = document.getElementById('lobby-duration').value || 90;
+  let maxPlayers = document.getElementById('lobby-max-players').value;
+  if (maxPlayers === 'custom') {
+    maxPlayers = document.getElementById('lobby-custom-players').value || 11;
+  }
   const errorDiv = document.getElementById('lobby-error');
 
   errorDiv.classList.add('hidden');
   errorDiv.textContent = '';
 
-  if (!homeTeamId || !awayTeamId) {
-    errorDiv.textContent = "Veuillez sélectionner deux équipes.";
-    errorDiv.classList.remove('hidden');
-    return;
-  }
-
-  if (parseInt(homeTeamId) === parseInt(awayTeamId)) {
-    errorDiv.textContent = "Veuillez choisir deux équipes différentes.";
-    errorDiv.classList.remove('hidden');
-    return;
-  }
+  // Mock temporaire pour le backend qui attend toujours des home_team_id
+  const homeTeamId = 1;
+  const awayTeamId = 2;
 
   try {
     const res = await fetch(`${API}/matchs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ home_team_id: homeTeamId, away_team_id: awayTeamId }),
+      body: JSON.stringify({ name: name, rules: rules, home_team_id: homeTeamId, away_team_id: awayTeamId }),
       credentials: 'include'
     });
 
