@@ -792,3 +792,192 @@ button:active, .btn:active {
   color: var(--text-primary);
 }
 
+/* ==========================================================================
+   SALON D'ATTENTE MULTIJOUEUR (LOBBY WAITING ROOM)
+   ========================================================================== */
+
+.lobby-container {
+  padding: 20px;
+  background: var(--surface-light);
+  border-radius: var(--border-radius);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+
+.lobby-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.lobby-header h2 {
+  font-size: 2rem;
+  margin-bottom: 10px;
+  background: -webkit-linear-gradient(45deg, var(--gold), #ffdf70);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.lobby-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 30px;
+}
+
+@media (max-width: 768px) {
+  .lobby-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.team-column {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: var(--border-radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform 0.3s;
+}
+
+.team-column:hover {
+  transform: translateY(-5px);
+  border-color: rgba(212, 175, 55, 0.2);
+}
+
+.team-column.home-team {
+  border-top: 4px solid var(--primary);
+}
+
+.team-column.away-team {
+  border-top: 4px solid var(--danger);
+}
+
+.team-column.unassigned {
+  border-top: 4px solid var(--text-muted);
+}
+
+.team-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 15px;
+  color: var(--text-primary);
+}
+
+.player-card {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 12px 15px;
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+.player-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.player-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--bg-dark);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: var(--gold);
+}
+
+.assign-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.btn-assign {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-assign.home:hover { background: var(--primary); }
+.btn-assign.away:hover { background: var(--danger); }
+
+.lobby-footer {
+  text-align: center;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.waiting-text {
+  color: var(--text-muted);
+  font-style: italic;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+/* ==========================================================================
+   PANNEAU DE RESUME DU MATCH (TIMELINE LIVE)
+   ========================================================================== */
+
+.match-summary-panel {
+  background: var(--surface-light);
+  border-radius: var(--border-radius);
+  padding: 20px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.timeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.timeline-event {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 10px 15px;
+  border-radius: 8px;
+  width: 45%;
+  position: relative;
+  animation: fadeIn 0.4s ease-out;
+}
+
+.timeline-minute {
+  font-weight: bold;
+  color: var(--gold);
+  font-size: 1.1rem;
+}
+
+.timeline-icon {
+  margin-left: 5px;
+  font-size: 1.2rem;
+}
+
+.timeline-details {
+  margin-top: 5px;
+  font-size: 1rem;
+  color: white;
+}
+
+.timeline-assist {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
