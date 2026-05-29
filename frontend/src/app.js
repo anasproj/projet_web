@@ -21,6 +21,12 @@ function parseMatchFields(match) {
   if (typeof match.goals === 'string') {
     try { match.goals = JSON.parse(match.goals); } catch(e) { match.goals = []; }
   }
+  if (!match.players || !Array.isArray(match.players)) {
+    match.players = [];
+  }
+  if (!match.goals || !Array.isArray(match.goals)) {
+    match.goals = [];
+  }
   return match;
 }
 
@@ -200,6 +206,7 @@ async function renderMatchDetails(id) {
     </div>`;
   try {
     await loadTeams();
+    const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == id);
 
@@ -446,6 +453,7 @@ function handleOfflineState() {
 async function refreshLiveMatchUI(matchId) {
   if (!matchId) return;
   try {
+    const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == matchId);
     if (!match) return;
@@ -591,6 +599,7 @@ function getTimelineHTML(match) {
 async function refreshLobbyUI(matchId) {
   if (!matchId) return;
   try {
+    const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == matchId);
     if (!match) return;
@@ -643,6 +652,7 @@ window.assignPlayer = async function(playerId, teamId) {
   // Re-render le lobby sans toucher au WS
   try {
     await loadTeams();
+    const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const match = matchs.find(m => m.id == liveMatchId);
     if (match) {
