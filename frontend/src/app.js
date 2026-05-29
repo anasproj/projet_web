@@ -211,6 +211,16 @@ async function renderMatchDetails(id) {
           joinLobby(match.id);
         }
         initRealtimeConnection();
+      } else {
+        // WS déjà ouvert : mettre à jour l'indicateur visuel directement
+        const dot = document.getElementById('live-status-dot');
+        const txt = document.getElementById('live-status-text');
+        if (dot && txt) {
+          dot.style.background = "#27ae60";
+          dot.style.boxShadow = "0 0 8px #27ae60";
+          txt.textContent = "En direct";
+          txt.style.color = "#27ae60";
+        }
       }
       return;
     }
@@ -311,25 +321,36 @@ function startChrono() {
   }, 1000);
 }
 
-// Connexion WebSocket
+// Connexion WebSocket — fonctionne dans le lobby ET dans la vue live
 function initRealtimeConnection() {
-  const dot = document.getElementById('live-status-dot');
-  const txt = document.getElementById('live-status-text');
-
-  if (!dot || !txt) return;
-
   console.log("Tentative de connexion WebSocket à :", WS_URL);
+
+  function setStatus(online) {
+    const dot = document.getElementById('live-status-dot');
+    const txt = document.getElementById('live-status-text');
+    const usersCount = document.getElementById('chat-users-count');
+    if (dot && txt) {
+      if (online) {
+        dot.style.background = "#27ae60";
+        dot.style.boxShadow = "0 0 8px #27ae60";
+        txt.textContent = "En direct";
+        txt.style.color = "#27ae60";
+      } else {
+        dot.style.background = "#e74c3c";
+        dot.style.boxShadow = "none";
+        txt.textContent = "Hors-ligne";
+        txt.style.color = "var(--text-muted)";
+      }
+    }
+    if (usersCount) usersCount.textContent = online ? "Connecté au live" : "Déconnecté";
+  }
 
   try {
     ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
-      dot.className = "status-dot connected";
-      dot.style.background = "#27ae60";
-      dot.style.boxShadow = "0 0 8px #27ae60";
-      txt.textContent = "En direct";
-      txt.style.color = "#27ae60";
-      document.getElementById('chat-users-count').textContent = "Connecté au live";
+      console.log("✅ WebSocket connecté");
+      setStatus(true);
     };
 
     ws.onmessage = (event) => {
@@ -341,16 +362,11 @@ function initRealtimeConnection() {
       }
     };
 
-    ws.onerror = () => {
-      handleOfflineState();
-    };
-
-    ws.onclose = () => {
-      handleOfflineState();
-    };
+    ws.onerror = () => { setStatus(false); };
+    ws.onclose = () => { setStatus(false); };
 
   } catch (e) {
-    handleOfflineState();
+    setStatus(false);
   }
 }
 
@@ -358,17 +374,13 @@ function handleOfflineState() {
   const dot = document.getElementById('live-status-dot');
   const txt = document.getElementById('live-status-text');
   const usersCount = document.getElementById('chat-users-count');
-
   if (dot && txt) {
-    dot.className = "status-dot";
     dot.style.background = "#e74c3c";
     dot.style.boxShadow = "none";
     txt.textContent = "Hors-ligne";
     txt.style.color = "var(--text-muted)";
   }
-  if (usersCount) {
-    usersCount.textContent = "Déconnecté";
-  }
+  if (usersCount) usersCount.textContent = "Déconnecté";
 }
 
 function handleIncomingRealtimeEvent(data) {
@@ -502,12 +514,19 @@ async function refreshLobbyUI(matchId) {
     const match = matchs.find(m => m.id == matchId);
     if (!match) return;
 
+    // Si le match est passé en live, charger la vue live complète
+    if (match.status === 'live') {
+      await renderMatchDetails(matchId);
+      return;
+    }
+
     await loadTeams();
     const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
     const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
     const currentUserId = localStorage.getItem('userId');
     const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
 
+    // Mettre à jour mockLobbyPlayers depuis la vraie BDD
     if (match.players && Array.isArray(match.players)) {
       mockLobbyPlayers = match.players.map(p => ({
         id: p.user_id,
@@ -517,6 +536,13 @@ async function refreshLobbyUI(matchId) {
     }
 
     app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+    // Restaurer l'indicateur WS vert si la connexion est déjà active
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const dot = document.getElementById('live-status-dot');
+      const txt = document.getElementById('live-status-text');
+      if (dot && txt) { dot.style.background="#27ae60"; dot.style.boxShadow="0 0 8px #27ae60"; txt.textContent="En direct"; txt.style.color="#27ae60"; }
+    }
+    // Le WS est toujours actif (on ne l'a pas recréé), pas besoin de le réinitialiser
   } catch(e) {
     console.error("Erreur refreshLobbyUI:", e);
   }
@@ -529,27 +555,51 @@ async function joinLobby(matchId) {
 }
 
 window.assignPlayer = async function(playerId, teamId) {
+  // Mise à jour locale immédiate (optimistic UI)
   const p = mockLobbyPlayers.find(pl => pl.id === playerId);
   if (p) p.team = teamId;
-  renderMatchDetails(liveMatchId);
 
+  // Re-render le lobby sans toucher au WS
+  try {
+    await loadTeams();
+    const data = await apiFetch('/matchs');
+    const matchs = Array.isArray(data) ? data : [];
+    const match = matchs.find(m => m.id == liveMatchId);
+    if (match) {
+      const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
+      const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
+      const currentUserId = localStorage.getItem('userId');
+      const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
+      app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+      // Restaurer l'indicateur WS vert si la connexion est déjà active
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const dot = document.getElementById('live-status-dot');
+        const txt = document.getElementById('live-status-text');
+        if (dot && txt) { dot.style.background="#27ae60"; dot.style.boxShadow="0 0 8px #27ae60"; txt.textContent="En direct"; txt.style.color="#27ae60"; }
+      }
+    }
+  } catch(e) { console.error("Erreur refresh après assign:", e); }
+
+  // Appel API pour persister + broadcaster via WS
   try {
     await apiFetch(`/matches/${liveMatchId}/assign`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: playerId, teamId: teamId })
     });
-  } catch(e) { console.log("L'API /assign n'est pas encore prête !"); }
+  } catch(e) { console.log("Erreur API /assign:", e); }
 };
 
 window.startMatch = async function(matchId) {
   try {
     await apiFetch(`/matches/${matchId}/start`, { method: 'POST' });
+    // L'event WS match_started va déclencher renderMatchDetails pour tout le monde
+    // Si on est le créateur, on redirige directement
+    await renderMatchDetails(matchId);
   } catch(e) { 
-    console.log("L'API /start n'est pas encore prête !"); 
+    console.error("Erreur lancement match:", e);
+    alert("Impossible de lancer le match : " + e.message);
   }
-  // MOCK TEMPORAIRE POUR TESTER L'UI SI L'API PLANTE
-  alert("Simulation: Le match est lancé !");
-  window.location.hash = '/home';
 };
 
 function appendChatMessage(username, text, isOutgoing = false, time = null) {
@@ -593,11 +643,14 @@ function handleSendChatMessage(e) {
 
 function cleanupLiveSession() {
   clearInterval(chronoInterval);
+  // On ferme le WS seulement si on quitte une page de match
+  // (le router appelle cleanupLiveSession avant chaque navigation)
   if (ws) {
     ws.close();
     ws = null;
   }
   liveMatchId = null;
+  lobbyJoined = false;
 }
 
 // Logique de la modale
