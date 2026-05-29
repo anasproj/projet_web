@@ -135,12 +135,20 @@ async function renderHome() {
       const homeTeam = teamsCache[m.home_team_id]?.name || "Équipe Domicile";
       const awayTeam = teamsCache[m.away_team_id]?.name || "Équipe Extérieur";
       return `
-      <div class="card" style="cursor:pointer;" onclick="window.location.hash='/match/${m.id}'">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
-          <h3 class="card-title">${homeTeam} <span style="font-weight:400; font-size:0.9rem; color:var(--text-muted)">vs</span> ${awayTeam}</h3>
-          <span class="lobby-badge badge-${m.status === 'live' ? 'live' : m.status === 'finished' ? 'finished' : 'waiting'}">${m.status.toUpperCase()}</span>
+      <div class="card" style="cursor:pointer; padding: 24px; display: flex; flex-direction: column; gap: 12px;" onclick="window.location.hash='/match/${m.id}'">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span class="lobby-badge badge-${m.status === 'live' ? 'live' : m.status === 'finished' ? 'finished' : 'waiting'}" style="font-size: 0.75rem; font-weight: 900; letter-spacing: 0.05em;">${m.status.toUpperCase()}</span>
+          <span class="text-muted" style="font-size:0.8rem; font-weight:600; color:var(--gold) !important; display:flex; align-items:center; gap:4px;">🏆 ${escapeHtml(m.rules)}</span>
         </div>
-        <p class="text-muted" style="font-size:0.85rem; font-weight:700; color:white;">Score : <span style="color:var(--gold)">${m.home_score} - ${m.away_score}</span></p>
+        <div>
+          <h3 style="font-size: 1.35rem; font-weight: 800; color: white; margin: 0; line-height: 1.2;">${escapeHtml(m.name)}</h3>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border);">
+          <div style="font-weight:700; font-size:1rem; color:var(--text-muted);">${homeTeam} <span style="font-weight:400; font-size:0.85rem;">vs</span> ${awayTeam}</div>
+          <div style="font-size:1.15rem; font-weight:900; color:white; background: var(--surface-light); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">
+            <span style="color:var(--gold);">${m.home_score}</span> - <span style="color:var(--gold);">${m.away_score}</span>
+          </div>
+        </div>
       </div>
     `}).join('');
 
