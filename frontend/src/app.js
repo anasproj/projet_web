@@ -195,7 +195,7 @@ async function renderMatchDetails(id) {
     const currentUserId = localStorage.getItem('userId');
     const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
 
-    if (match.status === 'waiting') {
+    if (match.status === 'scheduled' || match.status === 'waiting') {
       const currentUsername = localStorage.getItem('username');
       if (currentUsername && !mockLobbyPlayers.find(p => p.username === currentUsername)) {
         mockLobbyPlayers.push({ id: parseInt(currentUserId || 999), username: currentUsername, team: null });
@@ -383,16 +383,21 @@ function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
   const awayPlayers = mockLobbyPlayers.filter(p => p.team === match.away_team_id);
   const unassignedPlayers = mockLobbyPlayers.filter(p => !p.team);
 
-  const renderPlayerCard = (p, showAssignButtons) => `
+  const renderPlayerCard = (p) => `
     <div class="player-card">
       <div class="player-info">
         <div class="player-avatar">${p.username.charAt(0).toUpperCase()}</div>
         <span style="color:white; font-weight:600;">${escapeHtml(p.username)}</span>
       </div>
-      ${showAssignButtons && isCreator ? `
+      ${!p.team && isCreator ? `
         <div class="assign-actions">
           <button class="btn-assign home" onclick="assignPlayer(${p.id}, ${match.home_team_id})">🏠 Domicile</button>
           <button class="btn-assign away" onclick="assignPlayer(${p.id}, ${match.away_team_id})">✈️ Extérieur</button>
+        </div>
+      ` : ''}
+      ${p.team && isCreator ? `
+        <div class="assign-actions" style="margin-top: 8px;">
+          <button class="btn-assign" style="background:var(--danger); width:100%; border-radius:4px;" onclick="assignPlayer(${p.id}, null)">❌ Retirer de l'équipe</button>
         </div>
       ` : ''}
     </div>
@@ -418,17 +423,17 @@ function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
         <div class="lobby-columns">
           <div class="team-column home-team">
             <h3 class="team-title">🏠 ${homeTeam}</h3>
-            ${homePlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : homePlayers.map(p => renderPlayerCard(p, false)).join('')}
+            ${homePlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : homePlayers.map(renderPlayerCard).join('')}
           </div>
 
           <div class="team-column unassigned">
             <h3 class="team-title">⏳ En attente</h3>
-            ${unassignedPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : unassignedPlayers.map(p => renderPlayerCard(p, true)).join('')}
+            ${unassignedPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : unassignedPlayers.map(renderPlayerCard).join('')}
           </div>
 
           <div class="team-column away-team">
             <h3 class="team-title">✈️ ${awayTeam}</h3>
-            ${awayPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : awayPlayers.map(p => renderPlayerCard(p, false)).join('')}
+            ${awayPlayers.length === 0 ? '<p class="text-muted" style="text-align:center; font-size:0.9rem;">Vide</p>' : awayPlayers.map(renderPlayerCard).join('')}
           </div>
         </div>
 
