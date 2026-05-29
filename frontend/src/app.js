@@ -244,6 +244,9 @@ async function renderMatchDetails(id) {
           ` : ''}
           <span class="lobby-badge badge-${match.status === 'live' ? 'live' : match.status === 'finished' ? 'finished' : 'waiting'}" style="margin-bottom:12px; display:inline-block;">${match.status.toUpperCase()}</span>
           
+          <h2 style="font-size: 2.2rem; font-weight: 900; background: linear-gradient(45deg, #ffffff, #c7c7c7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px;">${escapeHtml(match.name)}</h2>
+          <p class="text-muted" style="margin-bottom: 20px; font-weight: 600; font-size: 1.1rem; color: var(--gold) !important;">🏆 ${escapeHtml(match.rules)}</p>
+
           <div>
             <div id="live-match-chrono" class="match-chrono">⏱️ 00:00</div>
           </div>
@@ -264,6 +267,42 @@ async function renderMatchDetails(id) {
                <button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Enregistrer un but</button>
             </div>
           ` : ''}
+        </div>
+
+        <!-- COMPOSITIONS DES ÉQUIPES -->
+        <div style="display: flex; gap: 20px; margin-top: 25px; margin-bottom: 25px; flex-wrap: wrap;">
+          <div class="card" style="flex: 1; min-width: 250px; padding: 20px; text-align: left; background: var(--surface-light);">
+            <h3 style="color: var(--primary); font-size: 1.1rem; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; display: flex; align-items: center; gap: 8px;">
+              🏠 ${homeTeam}
+            </h3>
+            <div id="live-home-players" style="display: flex; flex-direction: column; gap: 8px;">
+              ${match.players && match.players.filter(p => p.team_id == match.home_team_id).length > 0 
+                ? match.players.filter(p => p.team_id == match.home_team_id).map(p => `
+                    <div style="display: flex; align-items: center; gap: 8px; color: white;">
+                      <div class="player-avatar" style="width: 28px; height: 28px; font-size: 0.8rem; line-height: 28px; background: var(--primary); border-radius: 50%; text-align: center; font-weight: bold; color: white;">${p.username.charAt(0).toUpperCase()}</div>
+                      <span style="font-weight: 600;">${escapeHtml(p.username)}</span>
+                    </div>
+                  `).join('')
+                : '<p class="text-muted" style="font-size: 0.9rem; font-style: italic;">Aucun joueur assigné</p>'
+              }
+            </div>
+          </div>
+          <div class="card" style="flex: 1; min-width: 250px; padding: 20px; text-align: left; background: var(--surface-light);">
+            <h3 style="color: var(--danger); font-size: 1.1rem; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; display: flex; align-items: center; gap: 8px;">
+              ✈️ ${awayTeam}
+            </h3>
+            <div id="live-away-players" style="display: flex; flex-direction: column; gap: 8px;">
+              ${match.players && match.players.filter(p => p.team_id == match.away_team_id).length > 0 
+                ? match.players.filter(p => p.team_id == match.away_team_id).map(p => `
+                    <div style="display: flex; align-items: center; gap: 8px; color: white;">
+                      <div class="player-avatar" style="width: 28px; height: 28px; font-size: 0.8rem; line-height: 28px; background: var(--danger); border-radius: 50%; text-align: center; font-weight: bold; color: white;">${p.username.charAt(0).toUpperCase()}</div>
+                      <span style="font-weight: 600;">${escapeHtml(p.username)}</span>
+                    </div>
+                  `).join('')
+                : '<p class="text-muted" style="font-size: 0.9rem; font-style: italic;">Aucun joueur assigné</p>'
+              }
+            </div>
+          </div>
         </div>
         
         <!-- TIMELINE PANNEAU DE RESUME -->
@@ -442,8 +481,8 @@ function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
       <div class="lobby-container">
         <div class="lobby-header">
           <span class="lobby-badge badge-waiting" style="margin-bottom:15px; display:inline-block;">EN ATTENTE</span>
-          <h2>Salon d'attente</h2>
-          <p class="text-muted">Les équipes se mettent en place...</p>
+          <h2 style="font-size: 2.2rem; font-weight: 900; background: linear-gradient(45deg, #ffffff, #c7c7c7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px;">${escapeHtml(match.name)}</h2>
+          <p class="text-muted" style="margin-top: 8px; font-weight: 600; font-size: 1.1rem; color: var(--gold) !important;">🏆 ${escapeHtml(match.rules)}</p>
         </div>
 
         <div class="lobby-columns">
@@ -765,12 +804,14 @@ document.getElementById('lobby-cancel').addEventListener('click', () => {
 
 document.getElementById('lobby-confirm').addEventListener('click', async () => {
   const name = document.getElementById('lobby-name').value || "Match Amical";
-  const rules = "Classique";
   const duration = document.getElementById('lobby-duration').value || 90;
   let maxPlayers = document.getElementById('lobby-max-players').value;
   if (maxPlayers === 'custom') {
     maxPlayers = document.getElementById('lobby-custom-players').value || 11;
   }
+  const durationLabel = duration === 'unlimited' ? 'Sans limite de temps' : `${duration} min`;
+  const rules = `Format : ${maxPlayers} vs ${maxPlayers} (${durationLabel})`;
+  
   const errorDiv = document.getElementById('lobby-error');
 
   errorDiv.classList.add('hidden');
