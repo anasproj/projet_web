@@ -73,13 +73,30 @@
       
       <div class="modal-section" style="display:flex; flex-direction:column; gap:16px;">
         <div>
-          <label class="modal-label">Équipe Domicile :</label>
-          <select id="lobby-home-team" class="form-input" style="width:100%; box-sizing:border-box;"></select>
+          <label class="modal-label">Nom du Match :</label>
+          <input type="text" id="lobby-name" class="form-input" placeholder="Ex: Finale Tournoi, Match Amical..." style="width:100%; box-sizing:border-box;">
         </div>
         
-        <div>
-          <label class="modal-label">Équipe Extérieur :</label>
-          <select id="lobby-away-team" class="form-input" style="width:100%; box-sizing:border-box;"></select>
+        <div style="display:flex; gap:10px;">
+          <div style="flex:1;">
+            <label class="modal-label">Durée :</label>
+            <select id="lobby-duration" class="form-input" style="width:100%; box-sizing:border-box;">
+              <option value="10">10 min</option>
+              <option value="20">20 min</option>
+              <option value="90" selected>90 min</option>
+              <option value="unlimited">Sans limite</option>
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label class="modal-label">Joueurs/équipe :</label>
+            <select id="lobby-max-players" class="form-input" style="width:100%; box-sizing:border-box;" onchange="if(this.value==='custom') { document.getElementById('lobby-custom-players').classList.remove('hidden'); } else { document.getElementById('lobby-custom-players').classList.add('hidden'); }">
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="11" selected>11</option>
+              <option value="custom">Autre (choix)</option>
+            </select>
+            <input type="number" id="lobby-custom-players" class="form-input hidden" placeholder="Nb joueurs" style="width:100%; box-sizing:border-box; margin-top:5px;">
+          </div>
         </div>
 
         <div id="lobby-error" class="auth-message error hidden" style="margin-top:0;"></div>

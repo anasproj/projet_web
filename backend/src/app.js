@@ -249,7 +249,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
       // Le match est inséré avec le statut 'scheduled' par défaut (en attente)
       const result = await client.queryObject(
-        "INSERT INTO matches (name, rules, home_team_id, away_team_id, status, creator_id) VALUES ($1, $2, $3, $4, 'scheduled', $5) RETURNING *",
+        "INSERT INTO matches (name, rules, home_team_id, away_team_id, status, creator_id, match_date) VALUES ($1, $2, $3, $4, 'scheduled', $5, NOW()) RETURNING *",
         [matchName, matchRules, parseInt(home_team_id), parseInt(away_team_id), payload.userId]
       );
 
