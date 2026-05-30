@@ -66,6 +66,15 @@ async function getJwtKey() {
 // Set qui va stocker toutes les connexions actives
 const connectedClients = new Set();
 
+// Fonction utilitaire pour diffuser un événement à tous les navigateurs connectés
+function broadcastRealtimeEvent(matchId, eventType = "lobby_updated") {
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: eventType, matchId }));
+    }
+  }
+}
+
 // Fonction utilitaire pour extraire le token JWT depuis le header "Cookie"
 function getCookieToken(req) {
   const cookieHeader = req.headers.get("cookie");
@@ -88,7 +97,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "http://localhost:8080",
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS", // On autorise les méthodes
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS", // On autorise les méthodes
     "Access-Control-Allow-Headers": "Content-Type, Authorization" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
   });
 
@@ -243,19 +252,69 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
+  // --- ROUTE : DELETE /matchs/:id ou /matches/:id ---
+  if ((url.pathname.startsWith("/matchs/") || url.pathname.startsWith("/matches/")) && req.method === "DELETE") {
+    try {
+      const pathParts = url.pathname.split("/").filter(Boolean);
+      const matchId = Number(pathParts[1]);
+      if ((pathParts[0] !== "matchs" && pathParts[0] !== "matches") || pathParts.length !== 2 || !Number.isInteger(matchId)) {
+        return new Response(JSON.stringify({ error: "ID de match invalide" }), { status: 400, headers });
+      }
+
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+
+      const payload = await verify(token, await getJwtKey());
+      const userId = Number(payload.userId);
+      if (!Number.isInteger(userId)) {
+        return new Response(JSON.stringify({ error: "Token invalide" }), { status: 401, headers });
+      }
+
+      const userRes = await client.queryObject(`SELECT role FROM users WHERE id = $1`, [userId]);
+      if (userRes.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Utilisateur introuvable" }), { status: 401, headers });
+      }
+      const userRole = userRes.rows[0].role;
+
+      const matchRes = await client.queryObject(`SELECT creator_id FROM matches WHERE id = $1`, [matchId]);
+      if (matchRes.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Match introuvable" }), { status: 404, headers });
+      }
+      const creatorId = Number(matchRes.rows[0].creator_id);
+
+      if (userRole !== "admin" && userId !== creatorId) {
+        return new Response(JSON.stringify({ error: "Droits insuffisants pour supprimer ce lobby" }), { status: 403, headers });
+      }
+
+      // Nettoyage explicite des données liées avant suppression du lobby.
+      // Les contraintes sont normalement en ON DELETE CASCADE, mais ces DELETE
+      // évitent les erreurs si une base existante n'a pas été initialisée avec le bon schéma.
+      try {
+        await client.queryObject("BEGIN");
+        await client.queryObject(`DELETE FROM live_messages WHERE match_id = $1`, [matchId]);
+        await client.queryObject(`DELETE FROM goals WHERE match_id = $1`, [matchId]);
+        await client.queryObject(`DELETE FROM match_players WHERE match_id = $1`, [matchId]);
+        await client.queryObject(`DELETE FROM matches WHERE id = $1`, [matchId]);
+        await client.queryObject("COMMIT");
+      } catch (deleteError) {
+        await client.queryObject("ROLLBACK");
+        throw deleteError;
+      }
+
+      broadcastRealtimeEvent(matchId, "match_deleted");
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur DELETE /matchs/:id:", error);
+      return new Response(JSON.stringify({ error: "Erreur serveur lors de la suppression" }), { status: 500, headers });
+    }
+  }
+
   // ==========================================
   // --- SYSTÈME DE LOBBY (SALON D'ATTENTE) ---
   // ==========================================
 
-  // Fonction utilitaire pour diffuser un rafraîchissement du lobby via WebSocket
   // Fonction utilitaire pour diffuser un rafraîchissement du lobby via WebSocket avec un type spécifique
-  const broadcastLobbyUpdate = (matchId, eventType = "lobby_updated") => {
-    for (const client of connectedClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: eventType, matchId }));
-      }
-    }
-  };
+  const broadcastLobbyUpdate = broadcastRealtimeEvent;
 
   // 1. ROUTE : POST /matchs (Création du salon)
   if (url.pathname === "/matchs" && req.method === "POST") {
@@ -286,7 +345,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
         [newMatch.id, payload.userId]
       );
 
-      broadcastLobbyUpdate(newMatch.id, "player_joined");
+      broadcastLobbyUpdate(newMatch.id, "match_created");
       return new Response(JSON.stringify(newMatch), { status: 201, headers });
     } catch (error) {
       console.error(error);
