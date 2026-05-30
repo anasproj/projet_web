@@ -57,6 +57,7 @@ function updateNavLinks(path) {
 }
 
 function handleLogout() {
+  localStorage.removeItem('userId');
   localStorage.removeItem('username');
   localStorage.removeItem('role');
   navigate('/login');
@@ -68,10 +69,12 @@ function updateNavbar() {
   if (!navLinks) return;
 
   if (username) {
+    const isAdmin = localStorage.getItem('role') === 'admin';
     navLinks.innerHTML = `
       <a href="#/home" class="nav-link">Lobbys</a>
       <a href="#/ranking" class="nav-link">Classement</a>
       <a href="#/profile" class="nav-link">Mon Profil</a>
+      ${isAdmin ? `<a href="#/admin" class="nav-link">Admin</a>` : ''}
       <button id="nav-logout" class="btn btn-outline btn-sm">Déconnexion</button>
     `;
     document.getElementById('nav-logout').addEventListener('click', handleLogout);
@@ -111,6 +114,8 @@ async function router() {
     await renderMatchDetails(matchId);
   } else if (hash === '/ranking') {
     await renderRanking();
+  } else if (hash === '/admin') {
+    await renderAdmin();
   } else if (hash.startsWith('/profile')) {
     const parts = hash.split('/');
     const userId = parts[2];
@@ -1315,6 +1320,132 @@ async function renderProfile(userId) {
   }
 }
 
+async function renderAdmin() {
+  if (localStorage.getItem('role') !== 'admin') {
+    app.innerHTML = `
+      <div class="page">
+        <div class="card" style="padding: 30px; text-align:center;">
+          <h1>Accès refusé</h1>
+          <p class="text-muted">Cette page est réservée aux administrateurs.</p>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">Retour aux lobbys</button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement du panneau admin...</p>
+    </div>`;
+
+  try {
+    const users = await apiFetch('/admin/users');
+    const currentUserId = localStorage.getItem('userId');
+
+    const rows = users.map(user => {
+      const isCurrentUser = String(user.id) === String(currentUserId);
+      const nextRole = user.role === 'admin' ? 'fan' : 'admin';
+      const roleClass = user.role === 'admin' ? 'role-admin' : 'role-player';
+      return `
+        <tr>
+          <td style="font-weight:800; color:white;">#${user.id}</td>
+          <td>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <div class="player-avatar" style="width:32px; height:32px; line-height:32px; font-size:0.9rem;">${escapeHtml(user.username.charAt(0).toUpperCase())}</div>
+              <span style="font-weight:800; color:white;">${escapeHtml(user.username)}</span>
+              ${isCurrentUser ? '<span class="text-muted" style="font-size:0.8rem;">(vous)</span>' : ''}
+            </div>
+          </td>
+          <td><span class="role-badge ${roleClass}" style="text-transform:uppercase;">${escapeHtml(user.role)}</span></td>
+          <td class="ranking-stat">${Number(user.matches_played || 0)}</td>
+          <td class="ranking-stat">${Number(user.lobbies_created || 0)}</td>
+          <td style="text-align:right;">
+            <button class="btn btn-sm ${nextRole === 'admin' ? 'btn-success' : 'btn-outline'}" data-role-user-id="${user.id}" data-next-role="${nextRole}" ${isCurrentUser ? 'disabled title="Vous ne pouvez pas modifier votre propre rôle"' : ''}>
+              ${nextRole === 'admin' ? 'Passer admin' : 'Passer fan'}
+            </button>
+          </td>
+        </tr>`;
+    }).join('');
+
+    app.innerHTML = `
+      <div class="page fade-in">
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">
+          <div>
+            <h1>Panneau d'administration</h1>
+            <p class="text-muted">Gérez les utilisateurs et leurs rôles.</p>
+          </div>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">← Retour</button>
+        </div>
+
+        <div id="admin-message" class="auth-message hidden"></div>
+
+        <div class="ranking-table-container">
+          <table class="ranking-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Utilisateur</th>
+                <th>Rôle</th>
+                <th>Matchs</th>
+                <th>Lobbys créés</th>
+                <th style="text-align:right;">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || `<tr><td colspan="6" class="text-muted" style="text-align:center; padding:24px;">Aucun utilisateur.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    document.querySelectorAll('[data-role-user-id]').forEach(button => {
+      button.addEventListener('click', async () => {
+        await updateUserRole(button.dataset.roleUserId, button.dataset.nextRole);
+      });
+    });
+  } catch (error) {
+    console.error('Erreur admin:', error);
+    app.innerHTML = `
+      <div class="page">
+        <div class="card" style="padding: 30px; text-align:center;">
+          <h1>Impossible de charger l'administration</h1>
+          <p class="text-muted">${escapeHtml(error.message)}</p>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">Retour</button>
+        </div>
+      </div>`;
+  }
+}
+
+async function updateUserRole(userId, role) {
+  const message = document.getElementById('admin-message');
+  if (message) {
+    message.textContent = 'Modification en cours...';
+    message.className = 'auth-message';
+  }
+
+  try {
+    await apiFetch(`/admin/users/${userId}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
+
+    if (message) {
+      message.textContent = 'Rôle modifié avec succès.';
+      message.className = 'auth-message success';
+    }
+    await renderAdmin();
+  } catch (error) {
+    if (message) {
+      message.textContent = error.message;
+      message.className = 'auth-message error';
+    }
+    console.error(error);
+  }
+}
+
 function renderLogin() {
   app.innerHTML = `
     <div class="auth-container">
@@ -1398,10 +1529,10 @@ function renderLogin() {
         if (data.user) {
           localStorage.setItem('userId', data.user.id);
           localStorage.setItem('username', data.user.username);
-          localStorage.setItem('role', data.user.role || 'Fan');
+          localStorage.setItem('role', data.user.role || 'fan');
         } else {
           localStorage.setItem('username', username);
-          localStorage.setItem('role', 'Fan');
+          localStorage.setItem('role', 'fan');
         }
 
         authMsg.textContent = 'Connexion réussie ! Redirection...';
