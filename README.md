@@ -40,3 +40,4 @@ Pour vous connecter :
 
 * Essayer d'aller sur [http://localhost:8080/#/home](http://localhost:8080/#/home) sans être connecté.
 * L'application vous renvoie automatiquement vers [http://localhost:8080/#/login](http://localhost:8080/#/login).
+
