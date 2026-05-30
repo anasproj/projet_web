@@ -97,7 +97,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "http://localhost:8080",
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS", // On autorise les méthodes
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS", // On autorise les méthodes
     "Access-Control-Allow-Headers": "Content-Type, Authorization" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
   });
 
@@ -778,6 +778,88 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       return new Response(JSON.stringify({ error: "Erreur serveur" }), { status: 500, headers });
     }
   }
+
+
+
+  // ==========================================
+  // --- ROUTES D'ADMINISTRATION ---
+  // ==========================================
+
+  const isAdminRoute = url.pathname.startsWith("/admin");
+
+  if (isAdminRoute) {
+    try {
+      // 1. MIDDLEWARE : Vérification du token ET du rôle
+      const token = getCookieToken(req);
+      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
+      
+      const payload = await verify(token, await getJwtKey());
+      
+      // Sécurité absolue : Seuls les admins passent !
+      if (payload.role !== "admin") {
+        return new Response(JSON.stringify({ error: "Accès refusé. Rôle administrateur requis." }), { status: 403, headers });
+      }
+
+      // On découpe l'URL proprement en ignorant les slashs vides
+      const pathParts = url.pathname.split("/").filter(Boolean); 
+
+      // 2. ROUTE : GET /admin/users (Lister tous les utilisateurs avec leurs statistiques)
+      if (pathParts.length === 2 && pathParts[1] === "users" && req.method === "GET") {
+        // Requête SQL optimisée avec des sous-requêtes pour compter les matchs et lobbys
+        const query = `
+          SELECT 
+            u.id, 
+            u.username, 
+            u.role,
+            (SELECT COUNT(*) FROM match_players mp WHERE mp.user_id = u.id) AS matches_played,
+            (SELECT COUNT(*) FROM matches m WHERE m.creator_id = u.id) AS lobbies_created
+          FROM users u
+          ORDER BY u.id ASC
+        `;
+        const result = await client.queryObject(query);
+        
+        // On s'assure que les COUNT soient bien des nombres (PostgreSQL les renvoie parfois en string)
+        const formattedRows = result.rows.map(row => ({
+          ...row,
+          matches_played: Number(row.matches_played),
+          lobbies_created: Number(row.lobbies_created)
+        }));
+
+        return new Response(JSON.stringify(formattedRows), { status: 200, headers });
+      }
+
+      // 3. ROUTE : PATCH /admin/users/:id/role (Modifier le rôle d'un utilisateur)
+      if (pathParts.length === 4 && pathParts[1] === "users" && pathParts[3] === "role" && req.method === "PATCH") {
+        const targetUserId = parseInt(pathParts[2]);
+        if (isNaN(targetUserId)) {
+            return new Response(JSON.stringify({ error: "ID invalide" }), { status: 400, headers });
+        }
+
+        const body = await req.json();
+        const newRole = body.role; // Doit être "admin" ou "fan"
+
+        if (newRole !== "admin" && newRole !== "fan") {
+          return new Response(JSON.stringify({ error: "Le rôle doit être 'admin' ou 'fan'" }), { status: 400, headers });
+        }
+
+        // Mise à jour dans la base de données
+        await client.queryObject("UPDATE users SET role = $1 WHERE id = $2", [newRole, targetUserId]);
+        
+        return new Response(JSON.stringify({ message: `Le rôle de l'utilisateur ${targetUserId} est passé à ${newRole}` }), { status: 200, headers });
+      }
+
+      // Si la route admin demandée n'existe pas
+      return new Response(JSON.stringify({ error: "Route admin introuvable" }), { status: 404, headers });
+
+    } catch (error) {
+      console.error("Erreur Admin:", error);
+      return new Response(JSON.stringify({ error: "Erreur serveur ou token invalide" }), { status: 500, headers });
+    }
+  }
+
+
+
+
 
   // --- ROUTE PAR DÉFAUT ---
   return new Response(JSON.stringify({ message: "API Foot fonctionnelle !" }), { status: 200, headers });
