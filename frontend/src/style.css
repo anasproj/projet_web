@@ -149,6 +149,20 @@ body {
   padding: 20px;
 }
 
+#delete-lobby-modal {
+  z-index: 999999 !important;
+  background: rgba(0, 0, 0, 0.86);
+}
+
+.delete-lobby-box {
+  position: relative;
+  z-index: 1000000;
+  max-width: 480px;
+  text-align: center;
+  border-color: rgba(231, 76, 60, 0.65);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(231, 76, 60, 0.25);
+}
+
 .modal-box {
   background: var(--bg-card);
   border: 1px solid rgba(245, 200, 66, 0.3);

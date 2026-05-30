@@ -37,6 +37,7 @@ let chronoInterval = null;
 let matchTimer = 0;
 let lobbyJoined = false; // Guard pour n'appeler /join qu'une seule fois par session
 let currentMatchData = null;
+let homeRealtimeEnabled = false;
 
 // --- MOCK PLAYERS POUR LE LOBBY ---
 let mockLobbyPlayers = [];
@@ -116,13 +117,17 @@ async function router() {
     await renderProfile(userId);
   } else {
     await renderHome();
+    initHomeRealtimeConnection();
   }
 }
 
 async function apiFetch(endpoint, options = {}) {
   const res = await fetch(`${API}${endpoint}`, { credentials: 'include', ...options });
-  if (!res.ok) throw new Error(`Erreur API : ${res.status}`);
-  return res.json();
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(data?.error || `Erreur API : ${res.status}`);
+  }
+  return data;
 }
 
 async function loadTeams() {
@@ -145,16 +150,21 @@ async function renderHome() {
     </div>`;
   try {
     await loadTeams();
+    const data = await apiFetch('/matchs');
     const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
     const username = localStorage.getItem('username');
 
     const cards = matchs.map(m => {
       const homeTeam = teamsCache[m.home_team_id]?.name || "Équipe Domicile";
       const awayTeam = teamsCache[m.away_team_id]?.name || "Équipe Extérieur";
+      const canDelete = localStorage.getItem('role') === 'admin' || (localStorage.getItem('userId') && m.creator_id == localStorage.getItem('userId'));
       return `
-      <div class="card" style="cursor:pointer; padding: 24px; display: flex; flex-direction: column; gap: 12px;" onclick="window.location.hash='/match/${m.id}'">
+      <div class="card" data-open-match-id="${m.id}" style="cursor:pointer; padding: 24px; display: flex; flex-direction: column; gap: 12px; position:relative;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span class="lobby-badge badge-${m.status === 'live' ? 'live' : m.status === 'finished' ? 'finished' : 'waiting'}" style="font-size: 0.75rem; font-weight: 900; letter-spacing: 0.05em;">${m.status.toUpperCase()}</span>
+          <div style="display:flex; align-items:center; gap: 10px;">
+            <span class="lobby-badge badge-${m.status === 'live' ? 'live' : m.status === 'finished' ? 'finished' : 'waiting'}" style="font-size: 0.75rem; font-weight: 900; letter-spacing: 0.05em;">${m.status.toUpperCase()}</span>
+            ${canDelete ? `<button type="button" onclick="return window.confirmDeleteLobby(event, ${m.id})" data-delete-match-id="${m.id}" style="background:transparent; border:none; color:var(--danger); font-size:1.2rem; cursor:pointer; padding:8px; line-height:1; position:relative; z-index:20;" title="Supprimer le lobby" aria-label="Supprimer le lobby ${m.id}">❌</button>` : ''}
+          </div>
           <span class="text-muted" style="font-size:0.8rem; font-weight:600; color:var(--gold) !important; display:flex; align-items:center; gap:4px;">🏆 ${escapeHtml(m.rules)}</span>
         </div>
         <div>
@@ -184,6 +194,8 @@ async function renderHome() {
           <div class="lobbies-grid">${cards}</div>
         `}
       </div>`;
+
+    // Les clics sont gérés par le listener global en bas du fichier
 
     if (username) {
       const btn = document.getElementById('btn-create-lobby');
@@ -254,7 +266,10 @@ async function renderMatchDetails(id) {
     app.innerHTML = `
       <div class="page">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-          <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+          <div>
+            <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+            ${localStorage.getItem('role') === 'admin' || isCreator ? `<button type="button" class="btn" onclick="return window.confirmDeleteLobby(event, ${match.id})" data-delete-match-id="${match.id}" style="background: var(--danger); color: white; margin-left: 10px;">🗑️ Supprimer le lobby</button>` : ''}
+          </div>
           
           <div class="status-indicator">
             <span id="live-status-dot" class="status-dot"></span>
@@ -388,7 +403,21 @@ function startChrono() {
   }, 1000);
 }
 
-// Connexion WebSocket — fonctionne dans le lobby ET dans la vue live
+function initHomeRealtimeConnection() {
+  const username = localStorage.getItem('username');
+  if (!username) return;
+
+  homeRealtimeEnabled = true;
+  liveMatchId = null;
+
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  initRealtimeConnection();
+}
+
+// Connexion WebSocket — fonctionne sur l'accueil, dans le lobby ET dans la vue live
 function initRealtimeConnection() {
   console.log("Tentative de connexion WebSocket à :", WS_URL);
 
@@ -430,7 +459,10 @@ function initRealtimeConnection() {
     };
 
     ws.onerror = () => { setStatus(false); };
-    ws.onclose = () => { setStatus(false); };
+    ws.onclose = () => {
+      setStatus(false);
+      ws = null;
+    };
 
   } catch (e) {
     setStatus(false);
@@ -477,16 +509,27 @@ async function refreshLiveMatchUI(matchId) {
 }
 
 function handleIncomingRealtimeEvent(data) {
+  const isHome = (window.location.hash.replace('#', '') || '/home') === '/home';
+
   if (data.type === "score_update") {
     refreshLiveMatchUI(liveMatchId);
   } else if (data.type === "new_message") {
     appendChatMessage(data.username, data.text, false, data.time);
-  } else if (data.type === "player_joined" || data.type === "team_assigned") {
-    // Mise à jour légère : pas de reconnexion WS
-    refreshLobbyUI(liveMatchId);
-  } else if (data.type === "match_started") {
-    // Rechargement complet vers la vue du match
-    renderMatchDetails(liveMatchId);
+  } else if (["match_created", "match_deleted", "lobby_updated", "player_joined", "team_assigned", "match_started"].includes(data.type)) {
+    if (isHome) {
+      renderHome();
+      return;
+    }
+
+    if (data.type === "player_joined" || data.type === "team_assigned") {
+      // Mise à jour légère : pas de reconnexion WS
+      refreshLobbyUI(liveMatchId);
+    } else if (data.type === "match_started") {
+      // Rechargement complet vers la vue du match
+      renderMatchDetails(liveMatchId);
+    } else if (data.type === "match_deleted" && liveMatchId && data.matchId == liveMatchId) {
+      window.location.hash = '/home';
+    }
   }
 }
 
@@ -522,7 +565,10 @@ function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
   return `
     <div class="page">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-        <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+        <div>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+          ${localStorage.getItem('role') === 'admin' || isCreator ? `<button type="button" class="btn" onclick="return window.confirmDeleteLobby(event, ${match.id})" data-delete-match-id="${match.id}" style="background: var(--danger); color: white; margin-left: 10px;">🗑️ Supprimer le lobby</button>` : ''}
+        </div>
         <div class="status-indicator">
           <span id="live-status-dot" class="status-dot"></span>
           <span id="live-status-text" class="text-muted">Connexion...</span>
@@ -733,8 +779,18 @@ function handleSendChatMessage(e) {
 
 function cleanupLiveSession() {
   clearInterval(chronoInterval);
-  // On ferme le WS seulement si on quitte une page de match
-  // (le router appelle cleanupLiveSession avant chaque navigation)
+
+  const nextHash = window.location.hash.replace('#', '') || '/home';
+  const shouldKeepHomeRealtime = nextHash === '/home' && localStorage.getItem('username');
+
+  if (shouldKeepHomeRealtime) {
+    liveMatchId = null;
+    lobbyJoined = false;
+    homeRealtimeEnabled = true;
+    return;
+  }
+
+  homeRealtimeEnabled = false;
   if (ws) {
     ws.close();
     ws = null;
@@ -1071,6 +1127,7 @@ document.getElementById('lobby-confirm').addEventListener('click', async () => {
     }
 
     document.getElementById('lobby-modal').classList.add('hidden');
+    broadcastLocalLobbyChange('match_created', data.id);
     await renderHome();
   } catch (err) {
     errorDiv.textContent = err.message;
@@ -1383,6 +1440,152 @@ function renderLogin() {
     }
   });
 }
+function broadcastLocalLobbyChange(eventType, matchId) {
+  try {
+    localStorage.setItem('livefootstats:lobby-event', JSON.stringify({
+      type: eventType,
+      matchId,
+      at: Date.now()
+    }));
+  } catch (err) {
+    console.warn('Impossible de diffuser l’événement lobby localement:', err);
+  }
+}
+
+window.addEventListener('storage', (event) => {
+  if (event.key !== 'livefootstats:lobby-event' || !event.newValue) return;
+
+  const hash = window.location.hash.replace('#', '') || '/home';
+  if (hash !== '/home') return;
+
+  try {
+    const data = JSON.parse(event.newValue);
+    if (["match_created", "match_deleted", "lobby_updated"].includes(data.type)) {
+      renderHome();
+    }
+  } catch (err) {
+    console.warn('Événement lobby local invalide:', err);
+  }
+});
+
+// ==========================================
+// SUPPRESSION DE MATCH
+// ==========================================
+let pendingDeleteMatchId = null;
+let isDeletingLobby = false;
+
+function openDeleteLobbyModal(matchId) {
+  pendingDeleteMatchId = matchId;
+  const modal = document.getElementById('delete-lobby-modal');
+  const error = document.getElementById('delete-lobby-error');
+  const confirmButton = document.getElementById('delete-lobby-confirm');
+
+  if (!modal) {
+    // Sécurité si le HTML n'est pas encore à jour.
+    deleteMatch(matchId);
+    return;
+  }
+
+  if (error) {
+    error.textContent = '';
+    error.classList.add('hidden');
+  }
+  if (confirmButton) {
+    confirmButton.disabled = false;
+    confirmButton.textContent = 'Oui, supprimer';
+  }
+
+  modal.classList.remove('hidden');
+}
+
+function closeDeleteLobbyModal() {
+  if (isDeletingLobby) return;
+  pendingDeleteMatchId = null;
+  document.getElementById('delete-lobby-modal')?.classList.add('hidden');
+}
+
+async function deleteMatch(matchId) {
+  try {
+    await apiFetch(`/matchs/${matchId}`, { method: 'DELETE' });
+
+    pendingDeleteMatchId = null;
+    document.getElementById('delete-lobby-modal')?.classList.add('hidden');
+    broadcastLocalLobbyChange('match_deleted', matchId);
+
+    if (window.location.hash === '#/home' || window.location.hash === '') {
+      await renderHome();
+    } else {
+      window.location.hash = '/home';
+    }
+  } catch (err) {
+    const error = document.getElementById('delete-lobby-error');
+    if (error) {
+      error.textContent = `Erreur : ${err.message}`;
+      error.classList.remove('hidden');
+    } else {
+      alert(`Erreur lors de la suppression du lobby : ${err.message}`);
+    }
+    console.error(err);
+  }
+}
+
+window.confirmDeleteLobby = function(event, matchId) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+  }
+
+  openDeleteLobbyModal(matchId);
+  return false;
+};
+
+window.closeDeleteLobbyModal = closeDeleteLobbyModal;
+
+const deleteLobbyCancel = document.getElementById('delete-lobby-cancel');
+if (deleteLobbyCancel) {
+  deleteLobbyCancel.addEventListener('click', closeDeleteLobbyModal);
+}
+
+const deleteLobbyModal = document.getElementById('delete-lobby-modal');
+if (deleteLobbyModal) {
+  deleteLobbyModal.addEventListener('click', (event) => {
+    if (event.target === deleteLobbyModal) closeDeleteLobbyModal();
+  });
+}
+
+const deleteLobbyConfirm = document.getElementById('delete-lobby-confirm');
+if (deleteLobbyConfirm) {
+  deleteLobbyConfirm.addEventListener('click', async () => {
+    if (!pendingDeleteMatchId || isDeletingLobby) return;
+
+    isDeletingLobby = true;
+    deleteLobbyConfirm.disabled = true;
+    deleteLobbyConfirm.textContent = 'Suppression...';
+
+    await deleteMatch(pendingDeleteMatchId);
+
+    isDeletingLobby = false;
+    deleteLobbyConfirm.disabled = false;
+    deleteLobbyConfirm.textContent = 'Oui, supprimer';
+  });
+}
+
+// Navigation des cartes via JS, pas via onclick inline : les boutons restent prioritaires.
+document.addEventListener('click', (event) => {
+  const deleteButton = event.target.closest('[data-delete-match-id]');
+  if (deleteButton) {
+    window.confirmDeleteLobby(event, deleteButton.dataset.deleteMatchId);
+    return;
+  }
+
+  const matchCard = event.target.closest('[data-open-match-id]');
+  if (matchCard) {
+    window.location.hash = `/match/${matchCard.dataset.openMatchId}`;
+  }
+});
+
+window.deleteMatch = deleteMatch;
 
 window.addEventListener('hashchange', router);
 router();
