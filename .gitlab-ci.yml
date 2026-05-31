@@ -19,18 +19,13 @@ lint_code:
 build_images:
   stage: build
   image: docker:24.0.5
-  services:
-    - name: docker:24.0.5-dind
-      alias: docker
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
   before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
   script:
-    - docker build -t "$CI_REGISTRY_IMAGE/backend:latest" -f backend/Dockerfile .
-    - docker build -t "$CI_REGISTRY_IMAGE/frontend:latest" -f frontend/Dockerfile .
-    - docker push "$CI_REGISTRY_IMAGE/backend:latest"
-    - docker push "$CI_REGISTRY_IMAGE/frontend:latest"
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - docker build -t $CI_REGISTRY_IMAGE/backend:latest -f backend/Dockerfile .
+    - docker build -t $CI_REGISTRY_IMAGE/frontend:latest -f frontend/Dockerfile .
+    - docker push $CI_REGISTRY_IMAGE/backend:latest
+    - docker push $CI_REGISTRY_IMAGE/frontend:latest
+  only:
+    - main
+
