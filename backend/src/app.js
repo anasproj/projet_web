@@ -1,4 +1,4 @@
-import { create,verify, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
+import { create, verify, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
 import { Client } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
 // 1. Chargement des certificats HTTPS
@@ -18,6 +18,57 @@ const client = new Client({
 // Connexion à la BDD
 await client.connect();
 console.log("✅ Connecté avec succès à la base de données PostgreSQL !");
+
+// Migration légère pour les bases déjà initialisées avant les nouvelles fonctionnalités.
+await client.queryObject(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS paused_at TIMESTAMP`);
+await client.queryObject(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS elapsed_seconds INT DEFAULT 0`);
+await client.queryObject(`
+  CREATE TABLE IF NOT EXISTS player_stats (
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    overall INT DEFAULT 50,
+    rating_shot INT DEFAULT 50,
+    rating_pass INT DEFAULT 50,
+    rating_victory INT DEFAULT 50,
+    rating_form INT DEFAULT 50,
+    rating_defense INT DEFAULT 50,
+    matches_played INT DEFAULT 0,
+    wins INT DEFAULT 0,
+    losses INT DEFAULT 0,
+    draws INT DEFAULT 0,
+    goals INT DEFAULT 0,
+    assists INT DEFAULT 0,
+    motm_count INT DEFAULT 0,
+    current_streak INT DEFAULT 0,
+    best_streak INT DEFAULT 0
+  )
+`);
+await client.queryObject(`
+  CREATE TABLE IF NOT EXISTS match_stat_changes (
+    match_id INT REFERENCES matches(id) ON DELETE CASCADE,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    result VARCHAR(10) NOT NULL,
+    goals INT DEFAULT 0,
+    assists INT DEFAULT 0,
+    stats_before JSONB NOT NULL,
+    stats_after JSONB NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (match_id, user_id)
+  )
+`);
+await client.queryObject(`
+  CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    token VARCHAR(255) UNIQUE NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+await client.queryObject(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+await client.queryObject(`UPDATE users SET role = 'admin' WHERE username = 'imade'`);
+await client.queryObject(`INSERT INTO player_stats (user_id) SELECT id FROM users ON CONFLICT (user_id) DO NOTHING`);
+await client.queryObject(`CREATE INDEX IF NOT EXISTS idx_player_stats_overall ON player_stats(overall DESC)`);
+await client.queryObject(`CREATE INDEX IF NOT EXISTS idx_match_stat_changes_match ON match_stat_changes(match_id)`);
 
 console.log("🚀 Backend Deno prêt sur https://localhost:3000");
 
@@ -60,6 +111,58 @@ async function getJwtKey() {
 }
 
 
+const ACCESS_TOKEN_MAX_AGE = 60 * 15;
+const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7;
+
+async function createAccessToken(user) {
+  return await create(
+    { alg: "HS512", typ: "JWT" },
+    {
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      exp: getNumericDate(ACCESS_TOKEN_MAX_AGE)
+    },
+    await getJwtKey()
+  );
+}
+
+function generateRefreshToken() {
+  const bytes = new Uint8Array(48);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function hashToken(token) {
+  const pepper = Deno.env.get("PEPPER_SECRET") || "secret_poivre";
+  const data = new TextEncoder().encode(`${token}${pepper}`);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function createRefreshToken(userId) {
+  const refreshToken = generateRefreshToken();
+  const refreshTokenHash = await hashToken(refreshToken);
+  await client.queryObject(
+    "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '7 days')",
+    [userId, refreshTokenHash]
+  );
+  return refreshToken;
+}
+
+function appendAuthCookies(responseHeaders, accessToken, refreshToken = null) {
+  responseHeaders.append("Set-Cookie", `token=${accessToken}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=${ACCESS_TOKEN_MAX_AGE}`);
+  if (refreshToken) {
+    responseHeaders.append("Set-Cookie", `refreshToken=${refreshToken}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=${REFRESH_TOKEN_MAX_AGE}`);
+  }
+}
+
+function appendClearAuthCookies(responseHeaders) {
+  responseHeaders.append("Set-Cookie", "token=; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=0");
+  responseHeaders.append("Set-Cookie", "refreshToken=; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=0");
+}
+
+
 
 
 // --- GESTION DES WEBSOCKETS ---
@@ -75,13 +178,176 @@ function broadcastRealtimeEvent(matchId, eventType = "lobby_updated") {
   }
 }
 
-// Fonction utilitaire pour extraire le token JWT depuis le header "Cookie"
+
+
+function clampStat(value) {
+  return Math.max(30, Math.min(99, Math.round(Number(value) || 50)));
+}
+
+function defaultStats(userId) {
+  return {
+    user_id: userId,
+    overall: 50,
+    rating_shot: 50,
+    rating_pass: 50,
+    rating_victory: 50,
+    rating_form: 50,
+    rating_defense: 50,
+    matches_played: 0,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+    goals: 0,
+    assists: 0,
+    motm_count: 0,
+    current_streak: 0,
+    best_streak: 0
+  };
+}
+
+async function ensurePlayerStats(userId) {
+  await client.queryObject(
+    `INSERT INTO player_stats (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
+    [userId]
+  );
+}
+
+function normalizeStats(row, userId = null) {
+  const base = defaultStats(userId ?? row?.user_id);
+  return {
+    user_id: Number(row?.user_id ?? base.user_id),
+    overall: Number(row?.overall ?? base.overall),
+    rating_shot: Number(row?.rating_shot ?? base.rating_shot),
+    rating_pass: Number(row?.rating_pass ?? base.rating_pass),
+    rating_victory: Number(row?.rating_victory ?? base.rating_victory),
+    rating_form: Number(row?.rating_form ?? base.rating_form),
+    rating_defense: Number(row?.rating_defense ?? base.rating_defense),
+    matches_played: Number(row?.matches_played ?? base.matches_played),
+    wins: Number(row?.wins ?? base.wins),
+    losses: Number(row?.losses ?? base.losses),
+    draws: Number(row?.draws ?? base.draws),
+    goals: Number(row?.goals ?? base.goals),
+    assists: Number(row?.assists ?? base.assists),
+    motm_count: Number(row?.motm_count ?? base.motm_count),
+    current_streak: Number(row?.current_streak ?? base.current_streak),
+    best_streak: Number(row?.best_streak ?? base.best_streak)
+  };
+}
+
+function calculateUpdatedStats(before, result, goals, assists) {
+  const after = { ...before };
+  after.matches_played += 1;
+  after.goals += goals;
+  after.assists += assists;
+
+  if (result === "win") {
+    after.wins += 1;
+    after.current_streak = Math.max(1, after.current_streak + 1);
+    after.best_streak = Math.max(after.best_streak, after.current_streak);
+    after.rating_victory = clampStat(after.rating_victory + 2);
+    after.rating_form = clampStat(after.rating_form + 1);
+    after.overall = clampStat(after.overall + 1);
+  } else if (result === "loss") {
+    after.losses += 1;
+    after.current_streak = Math.min(-1, after.current_streak - 1);
+    after.rating_victory = clampStat(after.rating_victory - 1);
+    after.rating_form = clampStat(after.rating_form - 1);
+    after.overall = clampStat(after.overall - 1);
+  } else {
+    after.draws += 1;
+    after.current_streak = 0;
+    after.rating_form = clampStat(after.rating_form + 1);
+  }
+
+  after.rating_shot = clampStat(after.rating_shot + goals * 2);
+  after.rating_pass = clampStat(after.rating_pass + assists * 2);
+  after.overall = clampStat(after.overall + goals + assists);
+  after.rating_defense = clampStat(after.rating_defense + (result === "win" ? 1 : result === "loss" ? -1 : 0));
+
+  return after;
+}
+
+async function requireMatchController(req, matchId) {
+  const token = getCookieToken(req);
+  if (!token) {
+    return { error: { message: "Non autorisé", status: 401 } };
+  }
+
+  try {
+    const payload = await verify(token, await getJwtKey());
+    const userId = Number(payload.userId);
+    const userRes = await client.queryObject("SELECT id, role FROM users WHERE id = $1", [userId]);
+    if (userRes.rows.length === 0) {
+      return { error: { message: "Utilisateur introuvable", status: 401 } };
+    }
+
+    const matchRes = await client.queryObject("SELECT * FROM matches WHERE id = $1", [matchId]);
+    if (matchRes.rows.length === 0) {
+      return { error: { message: "Match introuvable", status: 404 } };
+    }
+
+    const user = userRes.rows[0];
+    const match = matchRes.rows[0];
+    if (user.role !== "admin" && Number(match.creator_id) !== userId) {
+      return { error: { message: "Seul le créateur ou un admin peut effectuer cette action", status: 403 } };
+    }
+
+    return { user, match };
+  } catch (error) {
+    console.error("Erreur requireMatchController:", error);
+    return { error: { message: "Token invalide ou expiré", status: 401 } };
+  }
+}
+
+// --- MIDDLEWARES / HELPERS HTTP ---
+function parseCookies(req) {
+  const cookieHeader = req.headers.get("cookie") || "";
+  return Object.fromEntries(cookieHeader.split(";").map(part => {
+    const [key, ...value] = part.trim().split("=");
+    return [key, value.join("=")];
+  }).filter(([key]) => key));
+}
+
+// Fonction utilitaire pour extraire le token JWT depuis le cookie "token"
 function getCookieToken(req) {
-  const cookieHeader = req.headers.get("cookie");
-  if (!cookieHeader) return null;
-  // Cherche la valeur après "token="
-  const match = cookieHeader.match(/token=([^;]+)/);
-  return match ? match[1] : null;
+  return parseCookies(req).token || null;
+}
+
+function getRefreshCookieToken(req) {
+  return parseCookies(req).refreshToken || null;
+}
+
+function jsonResponse(payload, { status = 200, headers } = {}) {
+  return new Response(JSON.stringify(payload), { status, headers });
+}
+
+async function requireAuth(req) {
+  const token = getCookieToken(req);
+  if (!token) return { error: { message: "Non autorisé", status: 401 } };
+
+  try {
+    const payload = await verify(token, await getJwtKey());
+    const userRes = await client.queryObject("SELECT id, username, role FROM users WHERE id = $1", [payload.userId]);
+    if (userRes.rows.length === 0) {
+      return { error: { message: "Utilisateur introuvable", status: 401 } };
+    }
+    return { user: userRes.rows[0], payload };
+  } catch (_error) {
+    return { error: { message: "Token invalide ou expiré", status: 401 } };
+  }
+}
+
+async function requireAdmin(req) {
+  const auth = await requireAuth(req);
+  if (auth.error) return auth;
+  if (auth.user.role !== "admin") {
+    return { error: { message: "Accès refusé. Rôle administrateur requis.", status: 403 } };
+  }
+  return auth;
+}
+
+function authErrorResponse(auth, headers) {
+  return jsonResponse({ error: auth.error.message }, { status: auth.error.status, headers });
 }
 
 
@@ -128,10 +394,11 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const passwordHash = await hashPassword(password, salt);
 
       // 3. Insertion dans la base de données PostgreSQL
-      await client.queryObject(
-        "INSERT INTO users (username, password_hash, salt, role) VALUES ($1, $2, $3, $4)",
+      const result = await client.queryObject(
+        "INSERT INTO users (username, password_hash, salt, role) VALUES ($1, $2, $3, $4) RETURNING id",
         [username, passwordHash, salt, "fan"]
       );
+      await ensurePlayerStats(result.rows[0].id);
 
       return new Response(JSON.stringify({ message: "Utilisateur créé avec succès !" }), { status: 201, headers });
     } catch (error) {
@@ -176,25 +443,14 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
         return new Response(JSON.stringify({ error: "Mot de passe incorrect" }), { status: 401, headers });
       }
 
-      // 3. Le mot de passe est bon ! On génère le JWT
-      const jwtKey = await getJwtKey();
-      const jwt = await create(
-        { alg: "HS512", typ: "JWT" }, // Header
-        { 
-          userId: user.id, 
-          username: user.username, 
-          role: user.role,
-          exp: getNumericDate(60 * 60 * 24) // Expire dans 24h
-        }, 
-        jwtKey // Signature
-      );
+      // 3. Le mot de passe est bon : on génère un Access Token court + un Refresh Token rotatif.
+      await client.queryObject("DELETE FROM refresh_tokens WHERE user_id = $1 OR expires_at < NOW()", [user.id]);
+      const jwt = await createAccessToken(user);
+      const refreshToken = await createRefreshToken(user.id);
 
-      // 4. On crée le cookie HttpOnly
-      const cookieHeader = `token=${jwt}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=86400`;
-      
-      // On ajoute le cookie à nos headers CORS existants
+      // 4. On crée les cookies HttpOnly sécurisés.
       const responseHeaders = new Headers(headers);
-      responseHeaders.append("Set-Cookie", cookieHeader);
+      appendAuthCookies(responseHeaders, jwt, refreshToken);
 
       return new Response(JSON.stringify({ 
         message: "Connexion réussie !",
@@ -212,11 +468,67 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
+
+  // --- ROUTE : POST /refresh ---
+  // Renouvelle l'Access Token à partir d'un Refresh Token HttpOnly stocké en BDD.
+  if (url.pathname === "/refresh" && req.method === "POST") {
+    try {
+      const refreshToken = getRefreshCookieToken(req);
+      if (!refreshToken) {
+        return jsonResponse({ error: "Refresh token manquant" }, { status: 401, headers });
+      }
+
+      const refreshTokenHash = await hashToken(refreshToken);
+      const tokenRes = await client.queryObject(`
+        SELECT rt.user_id, u.id, u.username, u.role
+        FROM refresh_tokens rt
+        JOIN users u ON u.id = rt.user_id
+        WHERE rt.token = $1 AND rt.expires_at > NOW()
+      `, [refreshTokenHash]);
+
+      if (tokenRes.rows.length === 0) {
+        const responseHeaders = new Headers(headers);
+        appendClearAuthCookies(responseHeaders);
+        return jsonResponse({ error: "Refresh token invalide ou expiré" }, { status: 401, headers: responseHeaders });
+      }
+
+      const user = tokenRes.rows[0];
+      await client.queryObject("DELETE FROM refresh_tokens WHERE token = $1 OR expires_at < NOW()", [refreshTokenHash]);
+      const newAccessToken = await createAccessToken(user);
+      const newRefreshToken = await createRefreshToken(user.id);
+      const responseHeaders = new Headers(headers);
+      appendAuthCookies(responseHeaders, newAccessToken, newRefreshToken);
+
+      return jsonResponse({ message: "Session renouvelée", user: { id: user.id, username: user.username, role: user.role } }, { status: 200, headers: responseHeaders });
+    } catch (error) {
+      console.error("Erreur refresh:", error);
+      return jsonResponse({ error: "Erreur serveur" }, { status: 500, headers });
+    }
+  }
+
+  // --- ROUTE : POST /logout ---
+  if (url.pathname === "/logout" && req.method === "POST") {
+    try {
+      const refreshToken = getRefreshCookieToken(req);
+      if (refreshToken) {
+        await client.queryObject("DELETE FROM refresh_tokens WHERE token = $1", [await hashToken(refreshToken)]);
+      }
+      const responseHeaders = new Headers(headers);
+      appendClearAuthCookies(responseHeaders);
+      return jsonResponse({ message: "Déconnexion réussie" }, { status: 200, headers: responseHeaders });
+    } catch (error) {
+      console.error("Erreur logout:", error);
+      return jsonResponse({ error: "Erreur serveur" }, { status: 500, headers });
+    }
+  }
+
   // --- ROUTE : GET /matchs ---
   if (url.pathname === "/matchs" && req.method === "GET") {
     try {
       const result = await client.queryObject(`
         SELECT m.*,
+          EXTRACT(EPOCH FROM m.started_at) * 1000 AS started_at_ms,
+          EXTRACT(EPOCH FROM m.paused_at) * 1000 AS paused_at_ms,
           (
             SELECT COALESCE(json_agg(
               json_build_object('user_id', u.id, 'username', u.username, 'team_id', mp.team_id)
@@ -340,6 +652,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       
       const newMatch = result.rows[0];
 
+      await ensurePlayerStats(payload.userId);
       await client.queryObject(
         "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2)",
         [newMatch.id, payload.userId]
@@ -367,10 +680,19 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const payload = await verify(token, await getJwtKey());
       const matchId = parseInt(pathParts[2]);
 
+      const matchRes = await client.queryObject("SELECT status FROM matches WHERE id = $1", [matchId]);
+      if (matchRes.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Match introuvable" }), { status: 404, headers });
+      }
+      if (matchRes.rows[0].status === "finished") {
+        return new Response(JSON.stringify({ error: "Impossible de rejoindre un match terminé" }), { status: 400, headers });
+      }
+
       await client.queryObject(
         "INSERT INTO match_players (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         [matchId, payload.userId]
       );
+      await ensurePlayerStats(payload.userId);
 
       // DIFFUSION WEBSOCKET SPÉCIFIQUE
       broadcastLobbyUpdate(matchId, "player_joined");
@@ -395,10 +717,15 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const targetUserId = body.userId || body.target_user_id; 
       const teamId = body.teamId || body.team_id;
 
-      const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      const matchCheck = await client.queryObject("SELECT creator_id, status FROM matches WHERE id = $1", [matchId]);
+      const userRoleRes = await client.queryObject("SELECT role FROM users WHERE id = $1", [payload.userId]);
+      const isAdmin = userRoleRes.rows[0]?.role === "admin";
       
-      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
-        return new Response(JSON.stringify({ error: "Seul le créateur peut assigner les équipes" }), { status: 403, headers });
+      if (matchCheck.rows.length === 0 || (!isAdmin && matchCheck.rows[0].creator_id !== payload.userId)) {
+        return new Response(JSON.stringify({ error: "Seul le créateur ou un admin peut assigner les équipes" }), { status: 403, headers });
+      }
+      if (!["scheduled", "waiting"].includes(matchCheck.rows[0].status)) {
+        return new Response(JSON.stringify({ error: "Impossible de modifier les équipes après le lancement" }), { status: 400, headers });
       }
 
       await client.queryObject(
@@ -424,14 +751,27 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       const payload = await verify(token, await getJwtKey());
       const matchId = parseInt(pathParts[2]);
 
-      const matchCheck = await client.queryObject("SELECT creator_id FROM matches WHERE id = $1", [matchId]);
+      const matchCheck = await client.queryObject("SELECT creator_id, status FROM matches WHERE id = $1", [matchId]);
+      const userRoleRes = await client.queryObject("SELECT role FROM users WHERE id = $1", [payload.userId]);
+      const isAdmin = userRoleRes.rows[0]?.role === "admin";
       
-      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
-        return new Response(JSON.stringify({ error: "Seul le créateur peut lancer le match" }), { status: 403, headers });
+      if (matchCheck.rows.length === 0 || (!isAdmin && matchCheck.rows[0].creator_id !== payload.userId)) {
+        return new Response(JSON.stringify({ error: "Seul le créateur ou un admin peut lancer le match" }), { status: 403, headers });
+      }
+      if (!["scheduled", "waiting"].includes(matchCheck.rows[0].status)) {
+        return new Response(JSON.stringify({ error: "Ce match ne peut plus être lancé" }), { status: 400, headers });
+      }
+
+      const unassignedRes = await client.queryObject(
+        "SELECT COUNT(*) AS count FROM match_players WHERE match_id = $1 AND team_id IS NULL",
+        [matchId]
+      );
+      if (Number(unassignedRes.rows[0].count) > 0) {
+        return new Response(JSON.stringify({ error: "Tous les joueurs doivent être assignés à une équipe avant le lancement" }), { status: 400, headers });
       }
 
       await client.queryObject(
-        "UPDATE matches SET status = 'live', started_at = CURRENT_TIMESTAMP WHERE id = $1",
+        "UPDATE matches SET status = 'live', started_at = CURRENT_TIMESTAMP, paused_at = NULL, elapsed_seconds = 0 WHERE id = $1",
         [matchId]
       );
 
@@ -466,15 +806,43 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
       // 2. Sécurité : Vérifier que c'est bien le créateur du match qui fait la requête
       const matchCheck = await client.queryObject(
-        "SELECT creator_id, home_team_id, away_team_id, home_score, away_score FROM matches WHERE id = $1", 
+        "SELECT creator_id, home_team_id, away_team_id, home_score, away_score, status FROM matches WHERE id = $1",
         [matchId]
       );
       
-      if (matchCheck.rows.length === 0 || matchCheck.rows[0].creator_id !== payload.userId) {
-        return new Response(JSON.stringify({ error: "Seul le créateur peut enregistrer un but" }), { status: 403, headers });
+      const userRoleRes = await client.queryObject("SELECT role FROM users WHERE id = $1", [payload.userId]);
+      const isAdmin = userRoleRes.rows[0]?.role === "admin";
+      if (matchCheck.rows.length === 0 || (!isAdmin && matchCheck.rows[0].creator_id !== payload.userId)) {
+        return new Response(JSON.stringify({ error: "Seul le créateur ou un admin peut enregistrer un but" }), { status: 403, headers });
+      }
+      if (matchCheck.rows[0].status !== "live") {
+        return new Response(JSON.stringify({ error: "Impossible d'enregistrer un but si le match n'est pas en direct" }), { status: 400, headers });
       }
 
       const match = matchCheck.rows[0];
+      if (![match.home_team_id, match.away_team_id].includes(parseInt(team_id))) {
+        return new Response(JSON.stringify({ error: "Cette équipe ne participe pas au match" }), { status: 400, headers });
+      }
+
+      if (scorer_id) {
+        const scorerCheck = await client.queryObject(
+          "SELECT team_id FROM match_players WHERE match_id = $1 AND user_id = $2",
+          [matchId, scorer_id]
+        );
+        if (scorerCheck.rows.length === 0 || scorerCheck.rows[0].team_id !== parseInt(team_id)) {
+          return new Response(JSON.stringify({ error: "Le buteur doit appartenir à l'équipe choisie" }), { status: 400, headers });
+        }
+      }
+
+      if (assist_id) {
+        const assistCheck = await client.queryObject(
+          "SELECT team_id FROM match_players WHERE match_id = $1 AND user_id = $2",
+          [matchId, assist_id]
+        );
+        if (assistCheck.rows.length === 0 || assistCheck.rows[0].team_id !== parseInt(team_id)) {
+          return new Response(JSON.stringify({ error: "Le passeur doit appartenir à l'équipe choisie" }), { status: 400, headers });
+        }
+      }
 
       // 3. Ajouter le but dans la table 'goals'
       await client.queryObject(
@@ -539,6 +907,226 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   }
 
 
+  // --- ROUTE : POST /matches/:id/pause ---
+  if (isMatchRoute && pathParts[3] === "pause" && req.method === "POST") {
+    try {
+      const matchId = parseInt(pathParts[2]);
+      const auth = await requireMatchController(req, matchId);
+      if (auth.error) return new Response(JSON.stringify({ error: auth.error.message }), { status: auth.error.status, headers });
+
+      if (auth.match.status !== "live") {
+        return new Response(JSON.stringify({ error: "Seul un match en direct peut être mis en pause" }), { status: 400, headers });
+      }
+
+      const elapsed = Number(auth.match.elapsed_seconds || 0) + Math.max(0, Math.floor((Date.now() - new Date(auth.match.started_at).getTime()) / 1000));
+      await client.queryObject(
+        "UPDATE matches SET status = 'paused', paused_at = CURRENT_TIMESTAMP, elapsed_seconds = $1 WHERE id = $2",
+        [elapsed, matchId]
+      );
+
+      broadcastLobbyUpdate(matchId, "match_paused");
+      return new Response(JSON.stringify({ message: "Match mis en pause", elapsed_seconds: elapsed }), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur pause match:", error);
+      return new Response(JSON.stringify({ error: "Erreur lors de la pause" }), { status: 500, headers });
+    }
+  }
+
+  // --- ROUTE : POST /matches/:id/resume ---
+  if (isMatchRoute && pathParts[3] === "resume" && req.method === "POST") {
+    try {
+      const matchId = parseInt(pathParts[2]);
+      const auth = await requireMatchController(req, matchId);
+      if (auth.error) return new Response(JSON.stringify({ error: auth.error.message }), { status: auth.error.status, headers });
+
+      if (auth.match.status !== "paused") {
+        return new Response(JSON.stringify({ error: "Seul un match en pause peut reprendre" }), { status: 400, headers });
+      }
+
+      await client.queryObject(
+        "UPDATE matches SET status = 'live', started_at = CURRENT_TIMESTAMP, paused_at = NULL WHERE id = $1",
+        [matchId]
+      );
+
+      broadcastLobbyUpdate(matchId, "match_resumed");
+      return new Response(JSON.stringify({ message: "Match repris" }), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur reprise match:", error);
+      return new Response(JSON.stringify({ error: "Erreur lors de la reprise" }), { status: 500, headers });
+    }
+  }
+
+  // --- ROUTE : POST /matches/:id/finish ---
+  if (isMatchRoute && pathParts[3] === "finish" && req.method === "POST") {
+    try {
+      const matchId = parseInt(pathParts[2]);
+      const auth = await requireMatchController(req, matchId);
+      if (auth.error) return new Response(JSON.stringify({ error: auth.error.message }), { status: auth.error.status, headers });
+
+      if (!["live", "paused"].includes(auth.match.status)) {
+        return new Response(JSON.stringify({ error: "Ce match ne peut pas être terminé" }), { status: 400, headers });
+      }
+
+      const match = auth.match;
+      const finalElapsed = Number(match.elapsed_seconds || 0) + (match.status === "live" && match.started_at
+        ? Math.max(0, Math.floor((Date.now() - new Date(match.started_at).getTime()) / 1000))
+        : 0);
+      const playersRes = await client.queryObject(`
+        SELECT mp.user_id, mp.team_id, u.username
+        FROM match_players mp
+        JOIN users u ON u.id = mp.user_id
+        WHERE mp.match_id = $1
+        ORDER BY u.username ASC
+      `, [matchId]);
+
+      if (playersRes.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Aucun joueur dans ce match" }), { status: 400, headers });
+      }
+
+      const goalsRes = await client.queryObject("SELECT scorer_id, assist_id, team_id, minute FROM goals WHERE match_id = $1 ORDER BY minute ASC", [matchId]);
+      const winnerTeamId = match.home_score > match.away_score ? match.home_team_id : match.away_score > match.home_score ? match.away_team_id : null;
+      const playerSummaries = [];
+
+      await client.queryObject("BEGIN");
+      try {
+        for (const player of playersRes.rows) {
+          await ensurePlayerStats(player.user_id);
+          const statsRes = await client.queryObject("SELECT * FROM player_stats WHERE user_id = $1", [player.user_id]);
+          const before = normalizeStats(statsRes.rows[0], player.user_id);
+          const goals = goalsRes.rows.filter(g => g.scorer_id === player.user_id).length;
+          const assists = goalsRes.rows.filter(g => g.assist_id === player.user_id).length;
+          const result = winnerTeamId === null ? "draw" : player.team_id === winnerTeamId ? "win" : "loss";
+          const after = calculateUpdatedStats(before, result, goals, assists);
+
+          await client.queryObject(`
+            UPDATE player_stats SET
+              overall = $2,
+              rating_shot = $3,
+              rating_pass = $4,
+              rating_victory = $5,
+              rating_form = $6,
+              rating_defense = $7,
+              matches_played = $8,
+              wins = $9,
+              losses = $10,
+              draws = $11,
+              goals = $12,
+              assists = $13,
+              motm_count = $14,
+              current_streak = $15,
+              best_streak = $16
+            WHERE user_id = $1
+          `, [
+            player.user_id,
+            after.overall,
+            after.rating_shot,
+            after.rating_pass,
+            after.rating_victory,
+            after.rating_form,
+            after.rating_defense,
+            after.matches_played,
+            after.wins,
+            after.losses,
+            after.draws,
+            after.goals,
+            after.assists,
+            after.motm_count,
+            after.current_streak,
+            after.best_streak
+          ]);
+
+          await client.queryObject(`
+            INSERT INTO match_stat_changes (match_id, user_id, result, goals, assists, stats_before, stats_after)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+            ON CONFLICT (match_id, user_id) DO UPDATE SET
+              result = EXCLUDED.result,
+              goals = EXCLUDED.goals,
+              assists = EXCLUDED.assists,
+              stats_before = EXCLUDED.stats_before,
+              stats_after = EXCLUDED.stats_after
+          `, [matchId, player.user_id, result, goals, assists, JSON.stringify(before), JSON.stringify(after)]);
+
+          playerSummaries.push({
+            user_id: player.user_id,
+            username: player.username,
+            team_id: player.team_id,
+            result,
+            goals,
+            assists,
+            before,
+            after
+          });
+        }
+
+        await client.queryObject("UPDATE matches SET status = 'finished', ended_at = CURRENT_TIMESTAMP, paused_at = NULL, elapsed_seconds = $2 WHERE id = $1", [matchId, finalElapsed]);
+        await client.queryObject("COMMIT");
+      } catch (error) {
+        await client.queryObject("ROLLBACK");
+        throw error;
+      }
+
+      const summary = {
+        match: { ...match, status: "finished", elapsed_seconds: finalElapsed },
+        winner_team_id: winnerTeamId,
+        goals: goalsRes.rows,
+        players: playerSummaries
+      };
+
+      broadcastLobbyUpdate(matchId, "match_finished");
+      return new Response(JSON.stringify(summary), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur finish match:", error);
+      return new Response(JSON.stringify({ error: "Erreur lors de la fin du match" }), { status: 500, headers });
+    }
+  }
+
+  // --- ROUTE : GET /matches/:id/summary ---
+  if (isMatchRoute && pathParts[3] === "summary" && req.method === "GET") {
+    try {
+      const matchId = parseInt(pathParts[2]);
+      const matchRes = await client.queryObject("SELECT * FROM matches WHERE id = $1", [matchId]);
+      if (matchRes.rows.length === 0) {
+        return new Response(JSON.stringify({ error: "Match introuvable" }), { status: 404, headers });
+      }
+
+      const goalsRes = await client.queryObject(`
+        SELECT g.*, us.username AS scorer_name, ua.username AS assist_name
+        FROM goals g
+        LEFT JOIN users us ON us.id = g.scorer_id
+        LEFT JOIN users ua ON ua.id = g.assist_id
+        WHERE g.match_id = $1
+        ORDER BY g.minute ASC
+      `, [matchId]);
+
+      const changesRes = await client.queryObject(`
+        SELECT msc.user_id, u.username, mp.team_id, msc.result, msc.goals, msc.assists, msc.stats_before, msc.stats_after
+        FROM match_stat_changes msc
+        JOIN users u ON u.id = msc.user_id
+        LEFT JOIN match_players mp ON mp.match_id = msc.match_id AND mp.user_id = msc.user_id
+        WHERE msc.match_id = $1
+        ORDER BY u.username ASC
+      `, [matchId]);
+
+      const match = matchRes.rows[0];
+      const winnerTeamId = match.home_score > match.away_score ? match.home_team_id : match.away_score > match.home_score ? match.away_team_id : null;
+      const players = changesRes.rows.map(row => ({
+        user_id: row.user_id,
+        username: row.username,
+        team_id: row.team_id,
+        result: row.result,
+        goals: Number(row.goals),
+        assists: Number(row.assists),
+        before: typeof row.stats_before === "string" ? JSON.parse(row.stats_before) : row.stats_before,
+        after: typeof row.stats_after === "string" ? JSON.parse(row.stats_after) : row.stats_after
+      }));
+
+      return new Response(JSON.stringify({ match, winner_team_id: winnerTeamId, goals: goalsRes.rows, players }), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur summary match:", error);
+      return new Response(JSON.stringify({ error: "Erreur lors du chargement du résumé" }), { status: 500, headers });
+    }
+  }
+
   // --- ROUTE : GET /teams ---
   // Permet de récupérer la liste des équipes depuis la base de données
   if (url.pathname === "/teams" && req.method === "GET") {
@@ -559,54 +1147,41 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   // Permet de récupérer le classement de tous les joueurs trié par note globale (OVR)
   if (url.pathname === "/leaderboard" && req.method === "GET") {
     try {
-      // 1. Requête SQL d'agrégation pour récupérer les stats de base de tous les joueurs
-      const query = `
-        SELECT 
-          u.id, 
+      const result = await client.queryObject(`
+        SELECT
+          u.id,
           u.username,
-          COUNT(DISTINCT mp.match_id) AS matches_played,
-          COUNT(DISTINCT g.id) AS goals,
-          COUNT(DISTINCT a.id) AS assists
+          ps.overall,
+          ps.matches_played,
+          ps.wins,
+          ps.goals,
+          ps.assists
         FROM users u
-        LEFT JOIN match_players mp ON u.id = mp.user_id
-        LEFT JOIN goals g ON u.id = g.scorer_id
-        LEFT JOIN goals a ON u.id = a.assist_id
-        GROUP BY u.id, u.username
-      `;
-      const result = await client.queryObject(query);
-      
-      // 2. Calcul de la note globale (OVR) pour chaque joueur (même logique que le profil)
-      const leaderboard = result.rows.map(user => {
-        const matches_played = Number(user.matches_played);
-        const goals = Number(user.goals);
-        const assists = Number(user.assists);
-        
-        // Calculs simulés des victoires et notes
-        const wins = Math.ceil(matches_played * 0.5);
-        const rating_shot = Math.min(99, 50 + goals * 5);
-        const rating_pass = Math.min(99, 50 + assists * 5);
-        const rating_victory = Math.min(99, 50 + wins * 6);
-        const rating_defense = Math.min(99, 50 + (matches_played - goals) * 2);
-        const rating_form = Math.min(99, 50 + wins * 4);
-        
-        const overall = Math.round((rating_shot + rating_pass + rating_victory + rating_defense + rating_form) / 5);
+        LEFT JOIN player_stats ps ON ps.user_id = u.id
+        ORDER BY COALESCE(ps.overall, 50) DESC, u.username ASC
+        LIMIT 50
+      `);
 
-        return {
-          id: user.id,
-          username: user.username,
-          matches_played,
-          goals,
-          assists,
-          wins,
-          overall
-        };
-      });
+      const leaderboard = [];
+      for (const user of result.rows) {
+        if (user.overall === null || user.overall === undefined) {
+          await ensurePlayerStats(user.id);
+          leaderboard.push({ id: user.id, username: user.username, overall: 50, matches_played: 0, wins: 0, goals: 0, assists: 0 });
+        } else {
+          leaderboard.push({
+            id: user.id,
+            username: user.username,
+            overall: Number(user.overall),
+            matches_played: Number(user.matches_played),
+            wins: Number(user.wins),
+            goals: Number(user.goals),
+            assists: Number(user.assists)
+          });
+        }
+      }
 
-      // 3. Trier le tableau : du meilleur joueur (overall le plus élevé) au moins bon
       leaderboard.sort((a, b) => b.overall - a.overall);
-
-      // On retourne le Top 50 pour éviter de surcharger le Frontend
-      return new Response(JSON.stringify(leaderboard.slice(0, 50)), { status: 200, headers });
+      return new Response(JSON.stringify(leaderboard), { status: 200, headers });
     } catch (error) {
       console.error(error);
       return new Response(JSON.stringify({ error: "Erreur lors de la génération du leaderboard" }), { status: 500, headers });
@@ -694,6 +1269,64 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
+
+  // --- ROUTE : GET /profile/:id/history ---
+  if (url.pathname.startsWith("/profile/") && url.pathname.endsWith("/history") && req.method === "GET") {
+    try {
+      const userIdStr = url.pathname.split("/")[2];
+      const userId = parseInt(userIdStr);
+      if (isNaN(userId)) {
+        return new Response(JSON.stringify({ error: "ID invalide" }), { status: 400, headers });
+      }
+
+      const historyRes = await client.queryObject(`
+        SELECT
+          m.id AS match_id,
+          m.name,
+          m.home_score,
+          m.away_score,
+          m.home_team_id,
+          m.away_team_id,
+          m.ended_at,
+          ht.name AS home_team_name,
+          at.name AS away_team_name,
+          msc.result,
+          msc.goals,
+          msc.assists,
+          msc.stats_before,
+          msc.stats_after
+        FROM match_stat_changes msc
+        JOIN matches m ON m.id = msc.match_id
+        LEFT JOIN teams ht ON ht.id = m.home_team_id
+        LEFT JOIN teams at ON at.id = m.away_team_id
+        WHERE msc.user_id = $1
+        ORDER BY COALESCE(m.ended_at, m.match_date) DESC, m.id DESC
+      `, [userId]);
+
+      const history = historyRes.rows.map(row => ({
+        match_id: row.match_id,
+        name: row.name,
+        home_score: Number(row.home_score),
+        away_score: Number(row.away_score),
+        home_team_id: row.home_team_id,
+        away_team_id: row.away_team_id,
+        home_team_name: row.home_team_name,
+        away_team_name: row.away_team_name,
+        ended_at: row.ended_at,
+        result: row.result,
+        goals: Number(row.goals),
+        assists: Number(row.assists),
+        before: typeof row.stats_before === "string" ? JSON.parse(row.stats_before) : row.stats_before,
+        after: typeof row.stats_after === "string" ? JSON.parse(row.stats_after) : row.stats_after
+      }));
+
+      return new Response(JSON.stringify({ history }), { status: 200, headers });
+    } catch (error) {
+      console.error("Erreur profile history:", error);
+      return new Response(JSON.stringify({ error: "Erreur serveur" }), { status: 500, headers });
+    }
+  }
+
   // --- ROUTE : GET /profile/:id ---
   // Permet de récupérer les informations de profil et statistiques d'un joueur
   if (url.pathname.startsWith("/profile/") && req.method === "GET") {
@@ -716,62 +1349,58 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
       const user = userResult.rows[0];
 
-      // 2. Calculer les statistiques du joueur dynamiquement
-      // Matchs joués
-      const matchesPlayedResult = await client.queryObject(
-        "SELECT COUNT(*) as count FROM match_players WHERE user_id = $1",
-        [userId]
-      );
-      const matches_played = Number(matchesPlayedResult.rows[0].count);
+      await ensurePlayerStats(userId);
+      const statsResult = await client.queryObject("SELECT * FROM player_stats WHERE user_id = $1", [userId]);
+      const stats = normalizeStats(statsResult.rows[0], userId);
 
-      // Buts marqués
-      const goalsResult = await client.queryObject(
-        "SELECT COUNT(*) as count FROM goals WHERE scorer_id = $1",
-        [userId]
-      );
-      const goals = Number(goalsResult.rows[0].count);
+      const recentRes = await client.queryObject(`
+        SELECT
+          m.id AS match_id,
+          m.name,
+          m.home_score,
+          m.away_score,
+          m.home_team_id,
+          m.away_team_id,
+          m.ended_at,
+          ht.name AS home_team_name,
+          at.name AS away_team_name,
+          msc.result,
+          msc.goals,
+          msc.assists,
+          msc.stats_before,
+          msc.stats_after
+        FROM match_stat_changes msc
+        JOIN matches m ON m.id = msc.match_id
+        LEFT JOIN teams ht ON ht.id = m.home_team_id
+        LEFT JOIN teams at ON at.id = m.away_team_id
+        WHERE msc.user_id = $1
+        ORDER BY COALESCE(m.ended_at, m.match_date) DESC, m.id DESC
+        LIMIT 3
+      `, [userId]);
 
-      // Passes décisives
-      const assistsResult = await client.queryObject(
-        "SELECT COUNT(*) as count FROM goals WHERE assist_id = $1",
-        [userId]
-      );
-      const assists = Number(assistsResult.rows[0].count);
-
-      // Mock logique cohérente pour les victoires/défaites
-      const wins = Math.ceil(matches_played * 0.5);
-      const losses = Math.floor(matches_played * 0.4);
-      const draws = matches_played - wins - losses;
-      
-      const rating_shot = Math.min(99, 50 + goals * 5);
-      const rating_pass = Math.min(99, 50 + assists * 5);
-      const rating_victory = Math.min(99, 50 + wins * 6);
-      const rating_defense = Math.min(99, 50 + (matches_played - goals) * 2);
-      const rating_form = Math.min(99, 50 + wins * 4);
-      const overall = Math.round((rating_shot + rating_pass + rating_victory + rating_defense + rating_form) / 5);
+      const recentMatches = recentRes.rows.map(row => ({
+        match_id: row.match_id,
+        name: row.name,
+        home_score: Number(row.home_score),
+        away_score: Number(row.away_score),
+        home_team_id: row.home_team_id,
+        away_team_id: row.away_team_id,
+        home_team_name: row.home_team_name,
+        away_team_name: row.away_team_name,
+        ended_at: row.ended_at,
+        result: row.result,
+        goals: Number(row.goals),
+        assists: Number(row.assists),
+        before: typeof row.stats_before === "string" ? JSON.parse(row.stats_before) : row.stats_before,
+        after: typeof row.stats_after === "string" ? JSON.parse(row.stats_after) : row.stats_after
+      }));
 
       user.created_at = new Date().toISOString(); // Mock date
-      user.stats = {
-        overall,
-        rating_shot,
-        rating_pass,
-        rating_victory,
-        rating_form,
-        rating_defense,
-        matches_played,
-        wins,
-        losses,
-        draws,
-        goals,
-        assists,
-        motm_count: 0,
-        current_streak: wins,
-        best_streak: wins
-      };
+      user.stats = stats;
 
       return new Response(JSON.stringify({
         user,
-        recentMatches: []
+        recentMatches
       }), { status: 200, headers });
     } catch (error) {
       console.error(error);
@@ -789,16 +1418,8 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
   if (isAdminRoute) {
     try {
-      // 1. MIDDLEWARE : Vérification du token ET du rôle
-      const token = getCookieToken(req);
-      if (!token) return new Response(JSON.stringify({ error: "Non autorisé" }), { status: 401, headers });
-      
-      const payload = await verify(token, await getJwtKey());
-      
-      // Sécurité absolue : Seuls les admins passent !
-      if (payload.role !== "admin") {
-        return new Response(JSON.stringify({ error: "Accès refusé. Rôle administrateur requis." }), { status: 403, headers });
-      }
+      const auth = await requireAdmin(req);
+      if (auth.error) return authErrorResponse(auth, headers);
 
       // On découpe l'URL proprement en ignorant les slashs vides
       const pathParts = url.pathname.split("/").filter(Boolean); 
