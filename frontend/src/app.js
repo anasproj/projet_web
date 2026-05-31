@@ -13,6 +13,73 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
+function statusLabel(status) {
+  return {
+    scheduled: 'EN ATTENTE',
+    waiting: 'EN ATTENTE',
+    live: 'EN DIRECT',
+    paused: 'EN PAUSE',
+    finished: 'TERMINÉ'
+  }[status] || String(status || '').toUpperCase();
+}
+
+function statusBadgeClass(status) {
+  if (status === 'live') return 'live';
+  if (status === 'paused') return 'paused';
+  if (status === 'finished') return 'finished';
+  return 'waiting';
+}
+
+function formatChrono(totalSeconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const mins = Math.floor(safeSeconds / 60).toString().padStart(2, '0');
+  const secs = (safeSeconds % 60).toString().padStart(2, '0');
+  return `${mins}:${secs}`;
+}
+
+function getMatchElapsedSeconds(match) {
+  if (!match) return 0;
+  const savedElapsed = Number(match.elapsed_seconds || 0);
+  const startedAtMs = Number(match.started_at_ms || 0);
+  if (match.status === 'live' && startedAtMs > 0) {
+    return savedElapsed + Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  }
+  return savedElapsed;
+}
+
+function showToast(message, type = 'info') {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+
+  setTimeout(() => toast.classList.add('toast-visible'), 20);
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    setTimeout(() => toast.remove(), 250);
+  }, 3500);
+}
+
+function render404() {
+  app.innerHTML = `
+    <div class="page not-found-page">
+      <div class="card" style="padding: 42px; text-align:center;">
+        <div style="font-size:4rem; margin-bottom:12px;">🚧</div>
+        <h1>Page introuvable</h1>
+        <p class="text-muted" style="margin:12px 0 24px;">La page demandée n'existe pas ou a été déplacée.</p>
+        <button class="btn btn-success" onclick="window.location.hash='/home'">Retour aux lobbys</button>
+      </div>
+    </div>`;
+}
+
 function parseMatchFields(match) {
   if (!match) return match;
   if (typeof match.players === 'string') {
@@ -38,6 +105,11 @@ let matchTimer = 0;
 let lobbyJoined = false; // Guard pour n'appeler /join qu'une seule fois par session
 let currentMatchData = null;
 let homeRealtimeEnabled = false;
+let realtimePollInterval = null;
+let realtimePollBusy = false;
+let lastHomeSnapshot = '';
+let lastMatchSnapshot = '';
+const REALTIME_POLL_MS = 1200;
 
 // --- MOCK PLAYERS POUR LE LOBBY ---
 let mockLobbyPlayers = [];
@@ -56,16 +128,27 @@ function updateNavLinks(path) {
   });
 }
 
-function handleLogout() {
+function clearLocalSession() {
   localStorage.removeItem('userId');
   localStorage.removeItem('username');
   localStorage.removeItem('role');
-  navigate('/login');
+}
+
+async function handleLogout() {
+  try {
+    await apiFetch('/logout', { method: 'POST', skipAuthRefresh: true });
+  } catch (error) {
+    console.warn('Déconnexion côté serveur impossible:', error);
+  } finally {
+    clearLocalSession();
+    navigate('/login');
+  }
 }
 
 function updateNavbar() {
   const username = localStorage.getItem('username');
   const navLinks = document.querySelector('.nav-links');
+  const navToggle = document.getElementById('nav-toggle');
   if (!navLinks) return;
 
   if (username) {
@@ -84,6 +167,14 @@ function updateNavbar() {
       <a href="#/login" class="nav-link">Connexion</a>
     `;
   }
+
+  navLinks.classList.remove('nav-open');
+  if (navToggle) {
+    navToggle.onclick = () => navLinks.classList.toggle('nav-open');
+  }
+  navLinks.querySelectorAll('a, button').forEach(el => {
+    el.addEventListener('click', () => navLinks.classList.remove('nav-open'));
+  });
 }
 
 async function router() {
@@ -109,30 +200,187 @@ async function router() {
 
   if (hash === '/login') {
     renderLogin();
-  } else if (hash.startsWith('/match/')) {
+  } else if (hash === '/home' || hash === '/') {
+    await renderHome();
+    initHomeRealtimeConnection();
+  } else if (/^\/match\/\d+\/summary$/.test(hash)) {
+    const matchId = hash.split('/')[2];
+    await renderMatchSummary(matchId);
+  } else if (/^\/match\/\d+$/.test(hash)) {
     const matchId = hash.split('/')[2];
     await renderMatchDetails(matchId);
   } else if (hash === '/ranking') {
     await renderRanking();
   } else if (hash === '/admin') {
     await renderAdmin();
-  } else if (hash.startsWith('/profile')) {
+  } else if (/^\/profile\/\d+\/history$/.test(hash)) {
+    const parts = hash.split('/');
+    await renderProfileHistory(parts[2]);
+  } else if (hash === '/profile' || /^\/profile\/\d+$/.test(hash)) {
     const parts = hash.split('/');
     const userId = parts[2];
     await renderProfile(userId);
   } else {
-    await renderHome();
-    initHomeRealtimeConnection();
+    render404();
   }
 }
 
+let refreshSessionPromise = null;
+
+async function refreshSession() {
+  if (!refreshSessionPromise) {
+    refreshSessionPromise = fetch(`${API}/refresh`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(data?.error || 'Session expirée');
+        }
+        if (data?.user) {
+          localStorage.setItem('userId', data.user.id);
+          localStorage.setItem('username', data.user.username);
+          localStorage.setItem('role', data.user.role || 'fan');
+        }
+        return data;
+      })
+      .finally(() => {
+        refreshSessionPromise = null;
+      });
+  }
+
+  return refreshSessionPromise;
+}
+
 async function apiFetch(endpoint, options = {}) {
-  const res = await fetch(`${API}${endpoint}`, { credentials: 'include', ...options });
-  const data = await res.json().catch(() => null);
+  const { skipAuthRefresh = false, ...fetchOptions } = options;
+  let res = await fetch(`${API}${endpoint}`, { credentials: 'include', ...fetchOptions });
+  let data = await res.json().catch(() => null);
+
+  if (res.status === 401 && !skipAuthRefresh && endpoint !== '/refresh' && endpoint !== '/login') {
+    try {
+      await refreshSession();
+      res = await fetch(`${API}${endpoint}`, { credentials: 'include', ...fetchOptions });
+      data = await res.json().catch(() => null);
+    } catch (refreshError) {
+      clearLocalSession();
+      if ((window.location.hash.replace('#', '') || '/home') !== '/login') {
+        showToast('Session expirée, reconnectez-vous.', 'error');
+        navigate('/login');
+      }
+      throw refreshError;
+    }
+  }
+
   if (!res.ok) {
     throw new Error(data?.error || `Erreur API : ${res.status}`);
   }
   return data;
+}
+
+
+function buildHomeSnapshot(matchs) {
+  return JSON.stringify((matchs || []).map(m => ({
+    id: m.id,
+    status: m.status,
+    home_score: m.home_score,
+    away_score: m.away_score,
+    players: (m.players || []).map(p => `${p.user_id}:${p.team_id || ''}`).sort(),
+    goals: (m.goals || []).length
+  })));
+}
+
+function getLobbyPlayers(match) {
+  return (match?.players || []).map(p => ({
+    id: Number(p.user_id ?? p.id),
+    user_id: Number(p.user_id ?? p.id),
+    username: p.username || 'Joueur',
+    team: p.team_id ? Number(p.team_id) : null,
+    team_id: p.team_id ? Number(p.team_id) : null
+  }));
+}
+
+function syncLobbyPlayers(match) {
+  mockLobbyPlayers = getLobbyPlayers(match);
+  return mockLobbyPlayers;
+}
+
+function buildMatchSnapshot(match) {
+  if (!match) return '';
+  return JSON.stringify({
+    id: match.id,
+    status: match.status,
+    home_score: match.home_score,
+    away_score: match.away_score,
+    elapsed_seconds: match.elapsed_seconds,
+    started_at_ms: match.started_at_ms,
+    players: getLobbyPlayers(match).map(p => `${p.user_id}:${p.username}:${p.team_id || ''}`).sort(),
+    goals: (match.goals || []).map(g => `${g.id || ''}:${g.team_id}:${g.scorer_id || ''}:${g.assist_id || ''}:${g.minute}`).sort()
+  });
+}
+
+function stopRealtimePolling() {
+  if (realtimePollInterval) {
+    clearInterval(realtimePollInterval);
+    realtimePollInterval = null;
+  }
+  realtimePollBusy = false;
+}
+
+function startRealtimePolling(scope, matchId = null) {
+  stopRealtimePolling();
+  if (!localStorage.getItem('username')) return;
+
+  realtimePollInterval = setInterval(async () => {
+    if (realtimePollBusy) return;
+    realtimePollBusy = true;
+    try {
+      const hash = window.location.hash.replace('#', '') || '/home';
+      const data = await apiFetch('/matchs');
+      const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
+
+      if (scope === 'home' && hash === '/home') {
+        const snapshot = buildHomeSnapshot(matchs);
+        if (lastHomeSnapshot && snapshot !== lastHomeSnapshot) {
+          lastHomeSnapshot = snapshot;
+          await renderHome();
+          initHomeRealtimeConnection();
+        } else {
+          lastHomeSnapshot = snapshot;
+        }
+        return;
+      }
+
+      if (scope === 'match' && /^\/match\/\d+$/.test(hash)) {
+        const currentMatchId = matchId || hash.split('/')[2];
+        const match = matchs.find(m => String(m.id) === String(currentMatchId));
+        if (!match) {
+          showToast('Ce lobby n’existe plus.', 'info');
+          window.location.hash = '/home';
+          return;
+        }
+
+        const snapshot = buildMatchSnapshot(match);
+        if (lastMatchSnapshot && snapshot !== lastMatchSnapshot) {
+          lastMatchSnapshot = snapshot;
+          if (match.status === 'scheduled' || match.status === 'waiting') {
+            await refreshLobbyUI(currentMatchId);
+          } else if (match.status === 'finished') {
+            window.location.hash = `/match/${currentMatchId}/summary`;
+          } else {
+            await renderMatchDetails(currentMatchId);
+          }
+        } else {
+          lastMatchSnapshot = snapshot;
+        }
+      }
+    } catch (error) {
+      console.warn('Polling temps réel indisponible:', error.message);
+    } finally {
+      realtimePollBusy = false;
+    }
+  }, REALTIME_POLL_MS);
 }
 
 async function loadTeams() {
@@ -167,7 +415,7 @@ async function renderHome() {
       <div class="card" data-open-match-id="${m.id}" style="cursor:pointer; padding: 24px; display: flex; flex-direction: column; gap: 12px; position:relative;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <div style="display:flex; align-items:center; gap: 10px;">
-            <span class="lobby-badge badge-${m.status === 'live' ? 'live' : m.status === 'finished' ? 'finished' : 'waiting'}" style="font-size: 0.75rem; font-weight: 900; letter-spacing: 0.05em;">${m.status.toUpperCase()}</span>
+            <span class="lobby-badge badge-${statusBadgeClass(m.status)}" style="font-size: 0.75rem; font-weight: 900; letter-spacing: 0.05em;">${statusLabel(m.status)}</span>
             ${canDelete ? `<button type="button" onclick="return window.confirmDeleteLobby(event, ${m.id})" data-delete-match-id="${m.id}" style="background:transparent; border:none; color:var(--danger); font-size:1.2rem; cursor:pointer; padding:8px; line-height:1; position:relative; z-index:20;" title="Supprimer le lobby" aria-label="Supprimer le lobby ${m.id}">❌</button>` : ''}
           </div>
           <span class="text-muted" style="font-size:0.8rem; font-weight:600; color:var(--gold) !important; display:flex; align-items:center; gap:4px;">🏆 ${escapeHtml(m.rules)}</span>
@@ -208,8 +456,11 @@ async function renderHome() {
         btn.addEventListener('click', openCreateLobbyModal);
       }
     }
+    lastHomeSnapshot = buildHomeSnapshot(matchs);
+    startRealtimePolling('home');
   } catch (err) {
     console.error(err);
+    showToast('Impossible de charger les lobbys.', 'error');
     app.innerHTML = `<div class="page"><p class="text-muted">Impossible de charger les matchs. Vérifiez que le backend est démarré.</p></div>`;
   }
 }
@@ -241,18 +492,15 @@ async function renderMatchDetails(id) {
     const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
 
     if (match.status === 'scheduled' || match.status === 'waiting') {
-      const currentUsername = localStorage.getItem('username');
-      if (currentUsername && !mockLobbyPlayers.find(p => p.username === currentUsername)) {
-        mockLobbyPlayers.push({ id: parseInt(currentUserId || 999), username: currentUsername, team: null });
-      }
+      syncLobbyPlayers(match);
       
       app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+      if (!lobbyJoined) {
+        lobbyJoined = true;
+        joinLobby(match.id);
+      }
       // Guard anti-boucle : ne pas recréer un WS déjà ouvert
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        if (!lobbyJoined) {
-          lobbyJoined = true;
-          joinLobby(match.id);
-        }
         initRealtimeConnection();
       } else {
         // WS déjà ouvert : mettre à jour l'indicateur visuel directement
@@ -265,15 +513,31 @@ async function renderMatchDetails(id) {
           txt.style.color = "#27ae60";
         }
       }
+      lastMatchSnapshot = buildMatchSnapshot(match);
+      startRealtimePolling('match', match.id);
       return;
     }
 
+    const canControl = localStorage.getItem('role') === 'admin' || isCreator;
+    const currentUserInMatch = match.players?.find(p => String(p.user_id) === String(currentUserId));
+    const isCurrentUserAssigned = Boolean(currentUserInMatch?.team_id);
+    const isLive = match.status === 'live';
+    const isPaused = match.status === 'paused';
+    const isFinished = match.status === 'finished';
+    const controlButtons = canControl && !isFinished ? `
+      <div class="match-control-actions">
+        ${isLive ? `<button class="btn btn-outline" onclick="pauseMatch(${match.id})">⏸️ Pause</button>` : ''}
+        ${isPaused ? `<button class="btn btn-success" onclick="resumeMatch(${match.id})">▶️ Reprendre</button>` : ''}
+        ${isLive ? `<button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Enregistrer un but</button>` : `<button class="btn btn-outline" disabled title="Le match doit être en direct">⚽ Enregistrer un but</button>`}
+        <button class="btn btn-danger" onclick="finishMatch(${match.id})">🏁 Terminer</button>
+      </div>` : '';
+
     app.innerHTML = `
       <div class="page">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <div class="match-topbar">
           <div>
             <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
-            ${localStorage.getItem('role') === 'admin' || isCreator ? `<button type="button" class="btn" onclick="return window.confirmDeleteLobby(event, ${match.id})" data-delete-match-id="${match.id}" style="background: var(--danger); color: white; margin-left: 10px;">🗑️ Supprimer le lobby</button>` : ''}
+            ${canControl ? `<button type="button" class="btn btn-danger" onclick="return window.confirmDeleteLobby(event, ${match.id})" data-delete-match-id="${match.id}" style="margin-left: 10px;">🗑️ Supprimer le lobby</button>` : ''}
           </div>
           
           <div class="status-indicator">
@@ -282,37 +546,35 @@ async function renderMatchDetails(id) {
           </div>
         </div>
         
-        <div class="card" style="text-align:center; padding: 40px 20px; position:relative;">
+        <div class="card live-hero">
           ${isCreator ? `
-            <span class="creator-badge" style="position:absolute; top:20px; right:20px; background:var(--gold); color:var(--bg-dark); padding:6px 12px; border-radius:20px; font-weight:bold; font-size:0.8rem; display:flex; align-items:center; gap:4px; box-shadow: 0 0 10px rgba(212, 175, 55, 0.3);">
+            <span class="creator-badge">
               🏆 Créateur
             </span>
           ` : ''}
-          <span class="lobby-badge badge-${match.status === 'live' ? 'live' : match.status === 'finished' ? 'finished' : 'waiting'}" style="margin-bottom:12px; display:inline-block;">${match.status.toUpperCase()}</span>
+          <span id="match-status-badge" class="lobby-badge badge-${statusBadgeClass(match.status)}" style="margin-bottom:12px; display:inline-block;">${statusLabel(match.status)}</span>
           
           <h2 style="font-size: 2.2rem; font-weight: 900; background: linear-gradient(45deg, #ffffff, #c7c7c7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px;">${escapeHtml(match.name)}</h2>
           <p class="text-muted" style="margin-bottom: 20px; font-weight: 600; font-size: 1.1rem; color: var(--gold) !important;">🏆 ${escapeHtml(match.rules)}</p>
 
           <div>
-            <div id="live-match-chrono" class="match-chrono">⏱️ 00:00</div>
+            <div id="live-match-chrono" class="match-chrono">⏱️ ${formatChrono(getMatchElapsedSeconds(match))}</div>
           </div>
 
-          <div style="display:flex; justify-content:center; align-items:center; gap:30px; margin-top:20px;">
-            <div style="flex:1; text-align:right;">
-              <h2 style="font-size:1.8rem;">${homeTeam}</h2>
+          <div class="live-score-row">
+            <div class="live-team-name live-team-home">
+              <h2>${homeTeam}</h2>
             </div>
-            <div id="live-score" style="font-size:3rem; font-weight:900; background:-webkit-linear-gradient(45deg, var(--gold), #ffdf70); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
+            <div id="live-score" class="live-score-value">
               ${match.home_score} - ${match.away_score}
             </div>
-            <div style="flex:1; text-align:left;">
-              <h2 style="font-size:1.8rem;">${awayTeam}</h2>
+            <div class="live-team-name live-team-away">
+              <h2>${awayTeam}</h2>
             </div>
           </div>
-          ${isCreator ? `
-            <div style="margin-top: 30px;">
-               <button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Enregistrer un but</button>
-            </div>
-          ` : ''}
+          ${controlButtons}
+          ${!canControl && isLive && isCurrentUserAssigned ? `<div style="margin-top:24px;"><button class="btn btn-success" onclick="openGoalModal(${match.id}, ${match.home_team_id}, ${match.away_team_id})">⚽ Signaler un but</button></div>` : ''}
+          ${isFinished ? `<div style="margin-top:24px;"><button class="btn btn-success" onclick="window.location.hash='/match/${match.id}/summary'">📊 Voir le résumé du match</button></div>` : ''}
         </div>
 
         <!-- TIMELINE PANNEAU DE RESUME -->
@@ -380,14 +642,16 @@ async function renderMatchDetails(id) {
     // Lier le formulaire de chat
     document.getElementById('chat-form').addEventListener('submit', handleSendChatMessage);
 
-    // Initialiser le chronomètre du match à une valeur logique pour la démo
-    matchTimer = match.status === 'live' ? 15 * 60 : 0; // Commence à 15:00 pour la démo
-    startChrono();
+    matchTimer = getMatchElapsedSeconds(match);
+    startChrono(match);
 
     // Initialiser la connexion WebSocket (seulement si pas déjà ouverte)
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
       initRealtimeConnection();
     }
+
+    lastMatchSnapshot = buildMatchSnapshot(match);
+    startRealtimePolling('match', match.id);
 
   } catch (e) {
     app.innerHTML = `<div class="page"><p>Erreur lors du chargement des détails du match.</p></div>`;
@@ -395,16 +659,19 @@ async function renderMatchDetails(id) {
 }
 
 // Logique du chronomètre
-function startChrono() {
+function startChrono(match = currentMatchData) {
   const chronoEl = document.getElementById('live-match-chrono');
   if (!chronoEl) return;
 
   clearInterval(chronoInterval);
+  matchTimer = getMatchElapsedSeconds(match);
+  chronoEl.textContent = `⏱️ ${formatChrono(matchTimer)}`;
+
+  if (match?.status !== 'live') return;
+
   chronoInterval = setInterval(() => {
-    matchTimer++;
-    const mins = Math.floor(matchTimer / 60).toString().padStart(2, '0');
-    const secs = (matchTimer % 60).toString().padStart(2, '0');
-    chronoEl.textContent = `⏱️ ${mins}:${secs}`;
+    matchTimer = getMatchElapsedSeconds(currentMatchData || match);
+    chronoEl.textContent = `⏱️ ${formatChrono(matchTimer)}`;
   }, 1000);
 }
 
@@ -497,13 +764,19 @@ async function refreshLiveMatchUI(matchId) {
 
     currentMatchData = match;
 
-    // 1. Mettre à jour le score dans le DOM
     const scoreEl = document.getElementById('live-score');
     if (scoreEl) {
       scoreEl.innerHTML = `${match.home_score} - ${match.away_score}`;
     }
 
-    // 2. Mettre à jour la timeline dans le DOM
+    const badgeEl = document.getElementById('match-status-badge');
+    if (badgeEl) {
+      badgeEl.className = `lobby-badge badge-${statusBadgeClass(match.status)}`;
+      badgeEl.textContent = statusLabel(match.status);
+    }
+
+    startChrono(match);
+
     const timelineContainer = document.getElementById('live-timeline-container');
     if (timelineContainer) {
       timelineContainer.innerHTML = getTimelineHTML(match);
@@ -514,25 +787,30 @@ async function refreshLiveMatchUI(matchId) {
 }
 
 function handleIncomingRealtimeEvent(data) {
-  const isHome = (window.location.hash.replace('#', '') || '/home') === '/home';
+  const currentHash = window.location.hash.replace('#', '') || '/home';
+  const isHome = currentHash === '/home';
+  const isCurrentMatch = !data.matchId || (liveMatchId && data.matchId == liveMatchId);
 
   if (data.type === "score_update") {
     refreshLiveMatchUI(liveMatchId);
   } else if (data.type === "new_message") {
-    appendChatMessage(data.username, data.text, false, data.time);
-  } else if (["match_created", "match_deleted", "lobby_updated", "player_joined", "team_assigned", "match_started"].includes(data.type)) {
+    if (isCurrentMatch) appendChatMessage(data.username, data.text, false, data.time);
+  } else if (["match_created", "match_deleted", "lobby_updated", "player_joined", "team_assigned", "match_started", "match_paused", "match_resumed", "match_finished"].includes(data.type)) {
     if (isHome) {
+      lastHomeSnapshot = '';
       renderHome();
       return;
     }
 
-    if (data.type === "player_joined" || data.type === "team_assigned") {
-      // Mise à jour légère : pas de reconnexion WS
+    if ((data.type === "player_joined" || data.type === "team_assigned") && isCurrentMatch) {
       refreshLobbyUI(liveMatchId);
-    } else if (data.type === "match_started") {
-      // Rechargement complet vers la vue du match
+    } else if (["match_started", "match_paused", "match_resumed"].includes(data.type) && isCurrentMatch) {
       renderMatchDetails(liveMatchId);
-    } else if (data.type === "match_deleted" && liveMatchId && data.matchId == liveMatchId) {
+    } else if (data.type === "match_finished" && isCurrentMatch) {
+      showToast('Match terminé : résumé disponible.', 'success');
+      window.location.hash = `/match/${data.matchId}/summary`;
+    } else if (data.type === "match_deleted" && isCurrentMatch) {
+      showToast('Lobby supprimé.', 'info');
       window.location.hash = '/home';
     }
   }
@@ -543,9 +821,10 @@ function handleIncomingRealtimeEvent(data) {
 // ==========================================
 
 function getLobbyHTML(match, homeTeam, awayTeam, isCreator) {
-  const homePlayers = mockLobbyPlayers.filter(p => p.team === match.home_team_id);
-  const awayPlayers = mockLobbyPlayers.filter(p => p.team === match.away_team_id);
-  const unassignedPlayers = mockLobbyPlayers.filter(p => !p.team);
+  const lobbyPlayers = getLobbyPlayers(match);
+  const homePlayers = lobbyPlayers.filter(p => p.team === Number(match.home_team_id));
+  const awayPlayers = lobbyPlayers.filter(p => p.team === Number(match.away_team_id));
+  const unassignedPlayers = lobbyPlayers.filter(p => !p.team);
 
   const renderPlayerCard = (p) => `
     <div class="player-card">
@@ -667,16 +946,10 @@ async function refreshLobbyUI(matchId) {
     const currentUserId = localStorage.getItem('userId');
     const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
 
-    // Mettre à jour mockLobbyPlayers depuis la vraie BDD
-    if (match.players && Array.isArray(match.players)) {
-      mockLobbyPlayers = match.players.map(p => ({
-        id: p.user_id,
-        username: p.username,
-        team: p.team_id || null
-      }));
-    }
+    syncLobbyPlayers(match);
 
     app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
+    lastMatchSnapshot = buildMatchSnapshot(match);
     // Restaurer l'indicateur WS vert si la connexion est déjà active
     if (ws && ws.readyState === WebSocket.OPEN) {
       const dot = document.getElementById('live-status-dot');
@@ -692,54 +965,67 @@ async function refreshLobbyUI(matchId) {
 async function joinLobby(matchId) {
   try {
     await apiFetch(`/matches/${matchId}/join`, { method: 'POST' });
+    lastMatchSnapshot = '';
+    await refreshLobbyUI(matchId);
+    broadcastLocalLobbyChange('player_joined', matchId);
   } catch(e) { console.log("L'API /join n'est pas encore prête !"); }
 }
 
 window.assignPlayer = async function(playerId, teamId) {
-  // Mise à jour locale immédiate (optimistic UI)
-  const p = mockLobbyPlayers.find(pl => pl.id === playerId);
-  if (p) p.team = teamId;
-
-  // Re-render le lobby sans toucher au WS
-  try {
-    await loadTeams();
-    const data = await apiFetch('/matchs');
-    const matchs = Array.isArray(data) ? data.map(parseMatchFields) : [];
-    const match = matchs.find(m => m.id == liveMatchId);
-    if (match) {
-      const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
-      const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
-      const currentUserId = localStorage.getItem('userId');
-      const isCreator = currentUserId && (parseInt(match.creator_id) === parseInt(currentUserId));
-      app.innerHTML = getLobbyHTML(match, homeTeam, awayTeam, isCreator);
-      // Restaurer l'indicateur WS vert si la connexion est déjà active
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const dot = document.getElementById('live-status-dot');
-        const txt = document.getElementById('live-status-text');
-        if (dot && txt) { dot.style.background="#27ae60"; dot.style.boxShadow="0 0 8px #27ae60"; txt.textContent="En direct"; txt.style.color="#27ae60"; }
-      }
-    }
-  } catch(e) { console.error("Erreur refresh après assign:", e); }
-
-  // Appel API pour persister + broadcaster via WS
   try {
     await apiFetch(`/matches/${liveMatchId}/assign`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: playerId, teamId: teamId })
     });
+    lastMatchSnapshot = '';
+    await refreshLobbyUI(liveMatchId);
+    broadcastLocalLobbyChange('team_assigned', liveMatchId);
   } catch(e) { console.log("Erreur API /assign:", e); }
 };
 
 window.startMatch = async function(matchId) {
   try {
     await apiFetch(`/matches/${matchId}/start`, { method: 'POST' });
-    // L'event WS match_started va déclencher renderMatchDetails pour tout le monde
-    // Si on est le créateur, on redirige directement
+    showToast('Le match a commencé.', 'success');
+    broadcastLocalLobbyChange('match_started', matchId);
     await renderMatchDetails(matchId);
   } catch(e) { 
     console.error("Erreur lancement match:", e);
-    alert("Impossible de lancer le match : " + e.message);
+    showToast("Impossible de lancer le match : " + e.message, 'error');
+  }
+};
+
+window.pauseMatch = async function(matchId) {
+  try {
+    await apiFetch(`/matches/${matchId}/pause`, { method: 'POST' });
+    showToast('Match mis en pause.', 'info');
+    await renderMatchDetails(matchId);
+  } catch (e) {
+    console.error('Erreur pause match:', e);
+    showToast('Impossible de mettre en pause : ' + e.message, 'error');
+  }
+};
+
+window.resumeMatch = async function(matchId) {
+  try {
+    await apiFetch(`/matches/${matchId}/resume`, { method: 'POST' });
+    showToast('Match repris.', 'success');
+    await renderMatchDetails(matchId);
+  } catch (e) {
+    console.error('Erreur reprise match:', e);
+    showToast('Impossible de reprendre : ' + e.message, 'error');
+  }
+};
+
+window.finishMatch = async function(matchId) {
+  try {
+    await apiFetch(`/matches/${matchId}/finish`, { method: 'POST' });
+    showToast('Match enregistré. Résumé généré.', 'success');
+    window.location.hash = `/match/${matchId}/summary`;
+  } catch (e) {
+    console.error('Erreur fin match:', e);
+    showToast('Impossible de terminer le match : ' + e.message, 'error');
   }
 };
 
@@ -784,6 +1070,7 @@ function handleSendChatMessage(e) {
 
 function cleanupLiveSession() {
   clearInterval(chronoInterval);
+  stopRealtimePolling();
 
   const nextHash = window.location.hash.replace('#', '') || '/home';
   const shouldKeepHomeRealtime = nextHash === '/home' && localStorage.getItem('username');
@@ -819,6 +1106,7 @@ let goalState = {
 };
 
 window.openGoalModal = function (matchId, homeTeamId, awayTeamId) {
+  const automaticMinute = Math.max(1, Math.floor(getMatchElapsedSeconds(currentMatchData) / 60) + 1);
   goalState = {
     matchId,
     homeTeamId,
@@ -828,7 +1116,7 @@ window.openGoalModal = function (matchId, homeTeamId, awayTeamId) {
     scorerTeamId: null,
     assistId: null,
     assistUsername: '',
-    minute: Math.max(1, Math.floor(matchTimer / 60) + 1)
+    minute: automaticMinute
   };
   document.getElementById('goal-modal').classList.remove('hidden');
   renderGoalStep1();
@@ -1030,9 +1318,8 @@ function renderGoalStep3() {
         <span style="color: var(--gold); font-weight: bold;">${goalState.assistUsername ? escapeHtml(goalState.assistUsername) : 'Aucune'}</span>
       </div>
 
-      <div style="margin-top: 10px;">
-        <label class="modal-label" style="display: block; margin-bottom: 6px;">Minute du but :</label>
-        <input id="goal-minute" type="number" min="1" max="120" class="form-input" style="width:100%; box-sizing:border-box;" value="${goalState.minute}" required />
+      <div style="margin-top: 10px; color: var(--text-muted); font-weight: 700;">
+        ⏱️ Minute automatique : <span style="color: var(--gold);">${goalState.minute}'</span>
       </div>
 
       <div id="goal-error" class="auth-message error hidden" style="margin-top:0;"></div>
@@ -1051,13 +1338,13 @@ window.closeGoalModal = function() {
 
 window.confirmGoal = async function() {
   const errorDiv = document.getElementById('goal-error');
-  const minute = document.getElementById('goal-minute').value || goalState.minute;
+  const minute = goalState.minute;
 
   errorDiv.classList.add('hidden');
   errorDiv.textContent = '';
 
   try {
-    const res = await fetch(`${API}/matchs/${goalState.matchId}/goal`, {
+    await apiFetch(`/matchs/${goalState.matchId}/goal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1065,16 +1352,15 @@ window.confirmGoal = async function() {
         scorer_id: goalState.scorerId,
         assist_id: goalState.assistId,
         minute: parseInt(minute)
-      }),
-      credentials: 'include'
+      })
     });
 
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || "Erreur lors de l'enregistrement du but.");
-    }
-
+    const scorerTeamName = teamsCache[goalState.scorerTeamId]?.name || (goalState.scorerTeamId == goalState.homeTeamId ? "l'équipe Domicile" : "l'équipe Extérieur");
+    const assistText = goalState.assistUsername ? ` (passe décisive de ${goalState.assistUsername})` : '';
+    appendChatMessage('Système', `⚽ BUUUUT pour ${scorerTeamName} ! Buteur : ${goalState.scorerUsername}${assistText} (${minute}')`, false);
     closeGoalModal();
+    showToast('But enregistré.', 'success');
+    await refreshLiveMatchUI(goalState.matchId);
   } catch (err) {
     errorDiv.textContent = err.message;
     errorDiv.classList.remove('hidden');
@@ -1132,6 +1418,7 @@ document.getElementById('lobby-confirm').addEventListener('click', async () => {
     }
 
     document.getElementById('lobby-modal').classList.add('hidden');
+    showToast('Lobby créé avec succès.', 'success');
     broadcastLocalLobbyChange('match_created', data.id);
     await renderHome();
   } catch (err) {
@@ -1140,6 +1427,119 @@ document.getElementById('lobby-confirm').addEventListener('click', async () => {
   }
 });
 
+
+
+function statDelta(before, after, key) {
+  return Number(after?.[key] ?? 0) - Number(before?.[key] ?? 0);
+}
+
+function renderStatDelta(label, before, after, key) {
+  const delta = statDelta(before, after, key);
+  const sign = delta > 0 ? '+' : '';
+  const className = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'neutral';
+  return `
+    <div class="summary-stat-row">
+      <span>${label}</span>
+      <strong>${before?.[key] ?? '-'} → ${after?.[key] ?? '-'}</strong>
+      <em class="delta-${className}">${sign}${delta}</em>
+    </div>`;
+}
+
+async function renderMatchSummary(matchId) {
+  app.innerHTML = `
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement du résumé...</p>
+    </div>`;
+
+  try {
+    await loadTeams();
+    const summary = await apiFetch(`/matches/${matchId}/summary`);
+    const match = summary.match || {};
+    const homeTeam = teamsCache[match.home_team_id]?.name || "Équipe Domicile";
+    const awayTeam = teamsCache[match.away_team_id]?.name || "Équipe Extérieur";
+    const winnerLabel = summary.winner_team_id
+      ? (summary.winner_team_id == match.home_team_id ? homeTeam : awayTeam)
+      : 'Match nul';
+
+    const goalsHtml = (summary.goals || []).length ? (summary.goals || []).map(goal => `
+      <div class="summary-goal-row">
+        <span>${goal.minute}'</span>
+        <strong>${escapeHtml(goal.scorer_name || 'Joueur')}</strong>
+        <em>${goal.assist_name ? `Passe : ${escapeHtml(goal.assist_name)}` : 'Sans passe'}</em>
+      </div>
+    `).join('') : `<p class="text-muted">Aucun but enregistré.</p>`;
+
+    const playersHtml = (summary.players || []).length ? (summary.players || []).map(player => {
+      const resultLabel = player.result === 'win' ? 'Victoire' : player.result === 'loss' ? 'Défaite' : 'Nul';
+      const resultClass = player.result === 'win' ? 'positive' : player.result === 'loss' ? 'negative' : 'neutral';
+      const teamName = teamsCache[player.team_id]?.name || 'Non assigné';
+      return `
+        <div class="summary-player-card">
+          <div class="summary-player-head">
+            <div>
+              <h3>${escapeHtml(player.username)}</h3>
+              <p class="text-muted">${escapeHtml(teamName)} · ${player.goals} but(s) · ${player.assists} passe(s)</p>
+            </div>
+            <span class="result-pill result-${resultClass}">${resultLabel}</span>
+          </div>
+          <div class="summary-stats-grid">
+            ${renderStatDelta('OVR', player.before, player.after, 'overall')}
+            ${renderStatDelta('Tir', player.before, player.after, 'rating_shot')}
+            ${renderStatDelta('Passe', player.before, player.after, 'rating_pass')}
+            ${renderStatDelta('Victoire', player.before, player.after, 'rating_victory')}
+            ${renderStatDelta('Forme', player.before, player.after, 'rating_form')}
+            ${renderStatDelta('Défense', player.before, player.after, 'rating_defense')}
+          </div>
+        </div>`;
+    }).join('') : `<p class="text-muted">Les changements de statistiques seront disponibles après l'enregistrement du match.</p>`;
+
+    app.innerHTML = `
+      <div class="page match-summary-page fade-in">
+        <div class="page-header summary-header">
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">⬅ Lobbys</button>
+          <div>
+            <h1>Résumé du match</h1>
+            <p class="text-muted">Stats FUT mises à jour après validation du résultat.</p>
+          </div>
+        </div>
+
+        <div class="card summary-score-card">
+          <span class="lobby-badge badge-finished">TERMINÉ</span>
+          <h2>${escapeHtml(match.name || 'Match')}</h2>
+          <div class="summary-score-line">
+            <span>${escapeHtml(homeTeam)}</span>
+            <strong>${match.home_score ?? 0} - ${match.away_score ?? 0}</strong>
+            <span>${escapeHtml(awayTeam)}</span>
+          </div>
+          <p class="summary-winner">🏆 ${escapeHtml(winnerLabel)}</p>
+        </div>
+
+        <div class="summary-layout">
+          <div class="card summary-section">
+            <h2>⚽ Buts</h2>
+            ${goalsHtml}
+          </div>
+          <div class="summary-section">
+            <h2>📈 Évolution des joueurs</h2>
+            <div class="summary-player-list">${playersHtml}</div>
+          </div>
+        </div>
+      </div>`;
+  } catch (error) {
+    console.error('Erreur résumé:', error);
+    showToast('Impossible de charger le résumé.', 'error');
+    app.innerHTML = `
+      <div class="page">
+        <div class="card" style="padding:30px; text-align:center;">
+          <h1>Résumé indisponible</h1>
+          <p class="text-muted">${escapeHtml(error.message)}</p>
+          <button class="btn btn-outline" onclick="window.location.hash='/home'">Retour</button>
+        </div>
+      </div>`;
+  }
+}
 
 async function renderRanking() {
   app.innerHTML = `
@@ -1231,6 +1631,37 @@ async function renderRanking() {
   }
 }
 
+
+function formatMatchDate(value) {
+  if (!value) return 'Date inconnue';
+  return new Date(value).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function getHistoryDelta(match, key = 'overall') {
+  return Number(match.after?.[key] ?? 0) - Number(match.before?.[key] ?? 0);
+}
+
+function renderMatchHistoryCard(match) {
+  const delta = getHistoryDelta(match, 'overall');
+  const sign = delta > 0 ? '+' : '';
+  const resultLabel = match.result === 'win' ? 'Victoire' : match.result === 'loss' ? 'Défaite' : 'Nul';
+  const resultClass = match.result === 'win' ? 'positive' : match.result === 'loss' ? 'negative' : 'neutral';
+  return `
+    <div class="history-card">
+      <div class="history-card-main">
+        <div>
+          <h3>${escapeHtml(match.name || 'Match')}</h3>
+          <p class="text-muted">${escapeHtml(match.home_team_name || 'Domicile')} ${match.home_score ?? 0} - ${match.away_score ?? 0} ${escapeHtml(match.away_team_name || 'Extérieur')}</p>
+          <p class="text-muted">${formatMatchDate(match.ended_at)} · ${match.goals || 0} but(s) · ${match.assists || 0} passe(s)</p>
+        </div>
+        <div class="history-card-side">
+          <span class="result-pill result-${resultClass}">${resultLabel}</span>
+          <strong class="history-delta ${delta >= 0 ? 'delta-positive' : 'delta-negative'}">OVR ${sign}${delta}</strong>
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderFutCard(stats, username) {
   const ovr = stats?.overall ?? 50;
   const tier = ovr >= 80 ? "gold" : ovr >= 60 ? "silver" : "bronze";
@@ -1281,6 +1712,10 @@ async function renderProfile(userId) {
       return `<div class="stat-box"><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`;
     }
 
+    const recentHtml = (recentMatches || []).length
+      ? recentMatches.map(renderMatchHistoryCard).join('')
+      : '<p class="text-muted">Aucun match enregistré pour le moment.</p>';
+
     app.innerHTML = `
       <div class="page fade-in">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;">
@@ -1309,6 +1744,14 @@ async function renderProfile(userId) {
           ${wl("Série act.", stats?.current_streak ?? 0)}
           ${wl("Meilleure série", stats?.best_streak ?? 0)}
         </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; margin: 32px 0 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+          <h2 style="font-size:1.3rem; font-weight:700; margin:0;">Historique des matchs</h2>
+          <button class="btn btn-outline btn-sm" onclick="window.location.hash='/profile/${user.id}/history'">Voir plus</button>
+        </div>
+        <div class="history-list">
+          ${recentHtml}
+        </div>
       </div>`;
   } catch (error) {
     console.error("Impossible de charger le profil", error);
@@ -1317,6 +1760,39 @@ async function renderProfile(userId) {
         <p class="text-muted">Impossible de charger le profil.</p>
         <button class="btn btn-outline" onclick="window.location.hash='/home'">Retour</button>
       </div>`;
+  }
+}
+
+
+async function renderProfileHistory(userId) {
+  const id = userId || localStorage.getItem('userId') || '1';
+  app.innerHTML = `
+    <div class="football-container">
+      <div class="football-ball">⚽</div>
+      <div class="football-shadow"></div>
+      <p class="loader-text">Chargement de l'historique...</p>
+    </div>`;
+
+  try {
+    const profile = await apiFetch(`/profile/${id}`);
+    const data = await apiFetch(`/profile/${id}/history`);
+    const history = data.history || [];
+    app.innerHTML = `
+      <div class="page fade-in">
+        <div class="page-header" style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">
+          <div>
+            <h1>Historique de ${escapeHtml(profile.user.username)}</h1>
+            <p class="text-muted">Tous les matchs enregistrés et les évolutions de stats.</p>
+          </div>
+          <button class="btn btn-outline" onclick="window.location.hash='/profile/${id}'">← Retour profil</button>
+        </div>
+        <div class="history-list">
+          ${history.length ? history.map(renderMatchHistoryCard).join('') : '<p class="text-muted">Aucun match enregistré.</p>'}
+        </div>
+      </div>`;
+  } catch (error) {
+    console.error('Erreur historique:', error);
+    app.innerHTML = `<div class="page"><p class="text-muted">Impossible de charger l'historique.</p><button class="btn btn-outline" onclick="window.location.hash='/profile/${id}'">Retour</button></div>`;
   }
 }
 
@@ -1591,7 +2067,8 @@ window.addEventListener('storage', (event) => {
 
   try {
     const data = JSON.parse(event.newValue);
-    if (["match_created", "match_deleted", "lobby_updated"].includes(data.type)) {
+    if (["match_created", "match_deleted", "lobby_updated", "match_started", "match_paused", "match_resumed", "match_finished", "player_joined", "team_assigned"].includes(data.type)) {
+      lastHomeSnapshot = '';
       renderHome();
     }
   } catch (err) {
@@ -1641,6 +2118,7 @@ async function deleteMatch(matchId) {
 
     pendingDeleteMatchId = null;
     document.getElementById('delete-lobby-modal')?.classList.add('hidden');
+    showToast('Lobby supprimé.', 'success');
     broadcastLocalLobbyChange('match_deleted', matchId);
 
     if (window.location.hash === '#/home' || window.location.hash === '') {
