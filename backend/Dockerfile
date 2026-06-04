@@ -2,17 +2,17 @@ FROM denoland/deno:alpine-2.0.0
 
 WORKDIR /app
 
-# Bascule sur l'utilisateur sécurisé non-root
+# Définit l'utilisateur non-root pour l'exécution.
 USER deno
 
-# Mise en cache de la configuration
+# Copie le fichier de configuration Deno.
 COPY --chown=deno:deno backend/deno.json ./
 
-# Copie des sources et mise en cache globale des dépendances
+# Copie le code source et met en cache les dépendances.
 COPY --chown=deno:deno backend/src/ ./src/
 RUN deno cache src/app.js
 
 EXPOSE 3000
 
-# Démarrage avec les autorisations strictes
+# Démarre l'application avec les permissions Deno requises.
 CMD ["run", "--allow-net", "--allow-env", "--allow-read", "--no-lock", "src/app.js"]

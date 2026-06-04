@@ -1,12 +1,12 @@
+/* Importe les fonctions de création et vérification des JWT ainsi que le client PostgreSQL. */
 import { create, verify, getNumericDate } from "https://deno.land/x/djwt@v3.0.1/mod.ts";
 import { Client } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 
-// 1. Chargement des certificats HTTPS
+/* Lit les certificats TLS nécessaires pour démarrer le serveur en HTTPS. */
 const cert = Deno.readTextFileSync("./certs/server.crt");
 const key = Deno.readTextFileSync("./certs/server.key");
 
-// 2. Configuration de la connexion à la base de données
-// On récupère les variables définies dans ton docker-compose.yml et .env
+/* Configure la connexion PostgreSQL à partir des variables d'environnement. */
 const client = new Client({
   user: Deno.env.get("DB_USER") || "foot_admin",
   database: Deno.env.get("DB_NAME") || "foot_app",
@@ -15,11 +15,11 @@ const client = new Client({
   port: Deno.env.get("DB_PORT") || 5432,
 });
 
-// Connexion à la BDD
+/* Ouvre la connexion à la base de données au démarrage. */
 await client.connect();
 console.log("✅ Connecté avec succès à la base de données PostgreSQL !");
 
-// Migration légère pour les bases déjà initialisées avant les nouvelles fonctionnalités.
+/* Applique les migrations de schéma idempotentes pour les bases déjà existantes. */
 await client.queryObject(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS paused_at TIMESTAMP`);
 await client.queryObject(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS elapsed_seconds INT DEFAULT 0`);
 await client.queryObject(`
@@ -72,35 +72,26 @@ await client.queryObject(`CREATE INDEX IF NOT EXISTS idx_match_stat_changes_matc
 
 console.log("🚀 Backend Deno prêt sur https://localhost:3000");
 
+// ================================================================
+// SECTION 1 — UTILITAIRES DE SÉCURITÉ
+// ================================================================
 
-
-// --- UTILITAIRES DE SÉCURITÉ ---
-
-// Fonction pour hacher le mot de passe avec Sel et Poivre
+/* Hache le mot de passe en combinant le mot de passe, le sel et le poivre avec SHA-256. */
 async function hashPassword(password, salt) {
-  // Le poivre est un secret serveur (stocké dans le .env, jamais en base de données)
   const pepper = Deno.env.get("PEPPER_SECRET") || "secret_poivre";
-  
-  // On combine : Mot de passe + Sel + Poivre
   const dataToHash = password + salt + pepper;
-  
-  // On hache avec l'algorithme SHA-256 natif
   const dataBuffer = new TextEncoder().encode(dataToHash);
   const hashBuffer = await crypto.subtle.digest("SHA-256", dataBuffer);
-  
-  // On convertit le résultat en chaîne de caractères (hexadécimal)
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Fonction pour générer un sel aléatoire (Différent pour chaque utilisateur)
+/* Génère un sel aléatoire unique sous forme d'UUID. */
 function generateSalt() {
   return crypto.randomUUID();
 }
 
-
-
-// Fonction pour générer la clé cryptographique pour signer les JWT
+/* Génère la clé cryptographique HMAC-SHA512 utilisée pour signer les JWT. */
 async function getJwtKey() {
   const secret = Deno.env.get("JWT_SECRET") || "secret_jwt_tres_long_et_complexe";
   const encoder = new TextEncoder();
@@ -110,10 +101,11 @@ async function getJwtKey() {
   );
 }
 
-
+/* Définit la durée de validité de l'Access Token (15 min) et du Refresh Token (7 jours). */
 const ACCESS_TOKEN_MAX_AGE = 60 * 15;
 const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7;
 
+/* Crée un Access Token JWT signé contenant l'identifiant, le nom et le rôle de l'utilisateur. */
 async function createAccessToken(user) {
   return await create(
     { alg: "HS512", typ: "JWT" },
@@ -127,12 +119,14 @@ async function createAccessToken(user) {
   );
 }
 
+/* Génère un Refresh Token aléatoire de 48 octets encodé en base64url. */
 function generateRefreshToken() {
   const bytes = new Uint8Array(48);
   crypto.getRandomValues(bytes);
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/* Hache un token avec le poivre avant de le stocker en base de données. */
 async function hashToken(token) {
   const pepper = Deno.env.get("PEPPER_SECRET") || "secret_poivre";
   const data = new TextEncoder().encode(`${token}${pepper}`);
@@ -140,6 +134,7 @@ async function hashToken(token) {
   return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+/* Crée un Refresh Token, le hache et l'enregistre en base de données. */
 async function createRefreshToken(userId) {
   const refreshToken = generateRefreshToken();
   const refreshTokenHash = await hashToken(refreshToken);
@@ -150,6 +145,7 @@ async function createRefreshToken(userId) {
   return refreshToken;
 }
 
+/* Ajoute les cookies d'authentification HttpOnly sécurisés dans les headers de la réponse. */
 function appendAuthCookies(responseHeaders, accessToken, refreshToken = null) {
   responseHeaders.append("Set-Cookie", `token=${accessToken}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=${ACCESS_TOKEN_MAX_AGE}`);
   if (refreshToken) {
@@ -157,6 +153,7 @@ function appendAuthCookies(responseHeaders, accessToken, refreshToken = null) {
   }
 }
 
+/* Efface les cookies d'authentification en les remplaçant par des cookies expirés. */
 function appendClearAuthCookies(responseHeaders) {
   responseHeaders.append("Set-Cookie", "token=; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=0");
   responseHeaders.append("Set-Cookie", "refreshToken=; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=0");
@@ -165,11 +162,14 @@ function appendClearAuthCookies(responseHeaders) {
 
 
 
-// --- GESTION DES WEBSOCKETS ---
-// Set qui va stocker toutes les connexions actives
+// ================================================================
+// SECTION 2 — GESTION DES WEBSOCKETS
+// ================================================================
+
+/* Stocke toutes les connexions WebSocket actives pour permettre le broadcast. */
 const connectedClients = new Set();
 
-// Fonction utilitaire pour diffuser un événement à tous les navigateurs connectés
+/* Envoie un événement JSON à tous les clients WebSocket dont la connexion est ouverte. */
 function broadcastRealtimeEvent(matchId, eventType = "lobby_updated") {
   for (const client of connectedClients) {
     if (client.readyState === WebSocket.OPEN) {
@@ -234,34 +234,73 @@ function normalizeStats(row, userId = null) {
   };
 }
 
+/*
+ * ============================================================================
+ * MODULE DE CALCUL DES STATISTIQUES FUT (PRÉSENTATION SOUTENANCE)
+ * ============================================================================
+ * Cette fonction algorithmique est le cœur du système de progression des joueurs.
+ * Elle prend les statistiques d'un joueur avant un match, et calcule ses 
+ * nouvelles statistiques (façon carte FUT) en fonction de deux critères majeurs :
+ * 1. Le résultat collectif de l'équipe (Victoire, Défaite, Nul)
+ * 2. La performance individuelle (Buts marqués, Passes décisives)
+ * 
+ * Concepts de Génie Logiciel appliqués ici : 
+ * - Pure Function : La fonction prend des entrées, renvoie un nouvel objet sans 
+ *   muter l'objet d'origine (immutabilité avec le spread operator {...before}).
+ * - Clamping : Utilisation de `clampStat` pour garantir que les notes restent 
+ *   toujours contenues dans les bornes autorisées (ex: 1 à 99).
+ */
 function calculateUpdatedStats(before, result, goals, assists) {
+  // On clone l'objet pour ne pas modifier la référence originale (immutabilité)
   const after = { ...before };
+  
+  // 1. Mise à jour des compteurs absolus (volume de jeu)
   after.matches_played += 1;
   after.goals += goals;
   after.assists += assists;
 
+  // 2. Impact du résultat COLLECTIF sur le mental et la forme
   if (result === "win") {
     after.wins += 1;
+    // Si la série était négative, elle repart à +1, sinon elle s'incrémente
     after.current_streak = Math.max(1, after.current_streak + 1);
+    // On met à jour la meilleure série historique du joueur si elle est battue
     after.best_streak = Math.max(after.best_streak, after.current_streak);
+    
+    // Une victoire booste fortement la note de victoire (+2) et légèrement la forme (+1)
     after.rating_victory = clampStat(after.rating_victory + 2);
     after.rating_form = clampStat(after.rating_form + 1);
     after.overall = clampStat(after.overall + 1);
+    
   } else if (result === "loss") {
     after.losses += 1;
+    // Si la série était positive, elle tombe à -1, sinon elle s'aggrave
     after.current_streak = Math.min(-1, after.current_streak - 1);
+    
+    // Une défaite pénalise les statistiques mentales du joueur
     after.rating_victory = clampStat(after.rating_victory - 1);
     after.rating_form = clampStat(after.rating_form - 1);
     after.overall = clampStat(after.overall - 1);
+    
   } else {
+    // Cas du match Nul : La série en cours est brisée (remise à 0)
     after.draws += 1;
     after.current_streak = 0;
+    // Un match nul est considéré comme "correct", on booste légèrement la forme
     after.rating_form = clampStat(after.rating_form + 1);
   }
 
+  // 3. Impact de la performance INDIVIDUELLE sur les attributs techniques
+  // Chaque but marqué augmente significativement la note de Frappe (rating_shot)
   after.rating_shot = clampStat(after.rating_shot + goals * 2);
+  
+  // Chaque passe décisive augmente la note de Passe (rating_pass)
   after.rating_pass = clampStat(after.rating_pass + assists * 2);
+  
+  // La note Globale (OVR) est un agrégat qui monte aussi selon la perf individuelle
   after.overall = clampStat(after.overall + goals + assists);
+  
+  // La note de Défense dépend de la solidité de l'équipe (victoire = bonne défense)
   after.rating_defense = clampStat(after.rating_defense + (result === "win" ? 1 : result === "loss" ? -1 : 0));
 
   return after;
@@ -299,7 +338,11 @@ async function requireMatchController(req, matchId) {
   }
 }
 
-// --- MIDDLEWARES / HELPERS HTTP ---
+// ================================================================
+// SECTION 3 — MIDDLEWARES ET HELPERS HTTP
+// ================================================================
+
+/* Parse le header Cookie de la requête et retourne un objet clé/valeur. */
 function parseCookies(req) {
   const cookieHeader = req.headers.get("cookie") || "";
   return Object.fromEntries(cookieHeader.split(";").map(part => {
@@ -308,19 +351,22 @@ function parseCookies(req) {
   }).filter(([key]) => key));
 }
 
-// Fonction utilitaire pour extraire le token JWT depuis le cookie "token"
+/* Extrait la valeur du cookie "token" (Access Token) de la requête. */
 function getCookieToken(req) {
   return parseCookies(req).token || null;
 }
 
+/* Extrait la valeur du cookie "refreshToken" de la requête. */
 function getRefreshCookieToken(req) {
   return parseCookies(req).refreshToken || null;
 }
 
+/* Construit une réponse JSON avec le statut HTTP donné. */
 function jsonResponse(payload, { status = 200, headers } = {}) {
   return new Response(JSON.stringify(payload), { status, headers });
 }
 
+/* Vérifie que l'Access Token JWT de la requête est valide et retourne l'utilisateur correspondant. */
 async function requireAuth(req) {
   const token = getCookieToken(req);
   if (!token) return { error: { message: "Non autorisé", status: 401 } };
@@ -337,6 +383,7 @@ async function requireAuth(req) {
   }
 }
 
+/* Vérifie que l'utilisateur authentifié possède le rôle "admin". */
 async function requireAdmin(req) {
   const auth = await requireAuth(req);
   if (auth.error) return auth;
@@ -346,6 +393,7 @@ async function requireAdmin(req) {
   return auth;
 }
 
+/* Convertit une erreur d'authentification en réponse HTTP JSON. */
 function authErrorResponse(auth, headers) {
   return jsonResponse({ error: auth.error.message }, { status: auth.error.status, headers });
 }
@@ -354,31 +402,31 @@ function authErrorResponse(auth, headers) {
 
 
 
-// 3. Création du serveur HTTP
+// ================================================================
+// SECTION 4 — SERVEUR HTTPS ET ROUTES REST
+// ================================================================
+
+/* Démarre le serveur HTTPS Deno sur le port 3000 et traite chaque requête entrante. */
 Deno.serve({ port: 3000, cert, key }, async (req) => {
   const url = new URL(req.url);
 
-  // Headers CORS pour autoriser le Frontend à communiquer avec l'API
+  /* Définit les headers CORS autorisant le frontend (port 8080) à appeler l'API. */
   const headers = new Headers({
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "http://localhost:8080",
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS", // On autorise les méthodes
-    "Access-Control-Allow-Headers": "Content-Type, Authorization" // LA LIGNE MAGIQUE POUR FIXER L'ERREUR
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization"
   });
 
-
-
-  // --- GESTION DU PREFLIGHT CORS (REQUÊTE OPTIONS) ---
-  // Le navigateur envoie une requête OPTIONS avant le POST pour vérifier les permissions
+  /* Répond au preflight CORS (OPTIONS) pour autoriser les requêtes cross-origin. */
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers });
   }
 
 
 
-  // --- ROUTE : POST /register ---
-  // Permet de créer un compte avec un mot de passe sécurisé (Sel + Poivre)
+  /* Crée un nouveau compte utilisateur et hache son mot de passe avec sel + poivre. */
   if (url.pathname === "/register" && req.method === "POST") {
     try {
       // 1. Récupération des données envoyées (comme dans le TD4)
@@ -417,8 +465,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
-  // --- ROUTE : POST /login ---
-  // Permet de se connecter et de recevoir un cookie avec le JWT
+  /* Vérifie les identifiants, génère un Access Token et un Refresh Token, puis les dépose en cookies. */
   if (url.pathname === "/login" && req.method === "POST") {
     try {
       const body = await req.json();
@@ -469,8 +516,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
-  // --- ROUTE : POST /refresh ---
-  // Renouvelle l'Access Token à partir d'un Refresh Token HttpOnly stocké en BDD.
+  /* Renouvelle l'Access Token à partir du Refresh Token et effectue une rotation du token. */
   if (url.pathname === "/refresh" && req.method === "POST") {
     try {
       const refreshToken = getRefreshCookieToken(req);
@@ -506,7 +552,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : POST /logout ---
+  /* Supprime le Refresh Token en base et efface les cookies du navigateur. */
   if (url.pathname === "/logout" && req.method === "POST") {
     try {
       const refreshToken = getRefreshCookieToken(req);
@@ -522,7 +568,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : GET /matchs ---
+  /* Retourne la liste de tous les matchs avec leurs joueurs et leurs buts en une seule requête SQL. */
   if (url.pathname === "/matchs" && req.method === "GET") {
     try {
       const result = await client.queryObject(`
@@ -564,7 +610,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : DELETE /matchs/:id ou /matches/:id ---
+  /* Vérifie les droits du demandeur puis supprime le match et toutes ses données liées. */
   if ((url.pathname.startsWith("/matchs/") || url.pathname.startsWith("/matches/")) && req.method === "DELETE") {
     try {
       const pathParts = url.pathname.split("/").filter(Boolean);
@@ -742,7 +788,17 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // 4. ROUTE : POST /matches/:id/start (Le créateur lance le match)
+  /*
+   * ROUTE : POST /matches/:id/start — Lancement officiel du match.
+   *
+   * Cause   : le lancement définit l'instant t=0 du chronometre et passe
+   *           le match en statut "live". Seuls le créateur/admin peuvent lancer.
+   * Effet   : vérifie que tous les joueurs sont assignés à une équipe, met
+   *           started_at = CURRENT_TIMESTAMP (timestamp serveur fiable) et
+   *           diffuse match_started via WebSocket.
+   * Sans ça : le chronometre ne serait pas synchronisé entre les clients,
+   *           chacun démarrant son propre compteur local à des moments différents.
+   */
   if (isMatchRoute && pathParts[3] === "start" && req.method === "POST") {
     try {
       const token = getCookieToken(req);
@@ -786,7 +842,17 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
-  // 5. ROUTE : POST /matchs/:id/goal (Le créateur enregistre un but)
+  /*
+   * ROUTE : POST /matches/:id/goal — Enregistrement d'un but en temps réel.
+   *
+   * Cause   : un but modifie le score du match et doit être diffusé instantanément
+   *           à tous les spectateurs via WebSocket.
+   * Effet   : valide que le match est "live", que le buteur appartient à l'équipe,
+   *           insère le but en BDD, met à jour le score et diffuse score_update
+   *           + new_message (annonce chat) à tous les clients WS connectés.
+   * Sans ça : les scores ne seraient pas enregistrés en base et les autres
+   *           joueurs n'auraient pas de mise à jour en temps réel.
+   */
   if (isMatchRoute && pathParts[3] === "goal" && req.method === "POST") {
     try { 
       // 1. Vérification du token JWT
@@ -907,7 +973,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   }
 
 
-  // --- ROUTE : POST /matches/:id/pause ---
+  /* Met le match en pause en sauvegardant le temps écoulé et diffuse l'événement. */
   if (isMatchRoute && pathParts[3] === "pause" && req.method === "POST") {
     try {
       const matchId = parseInt(pathParts[2]);
@@ -932,7 +998,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : POST /matches/:id/resume ---
+  /* Reprend un match en pause en remettant started_at à maintenant pour recalculer le chrono. */
   if (isMatchRoute && pathParts[3] === "resume" && req.method === "POST") {
     try {
       const matchId = parseInt(pathParts[2]);
@@ -956,7 +1022,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : POST /matches/:id/finish ---
+  /* Clôture le match, calcule les évolutions de stats FUT et les sauvegarde dans une transaction SQL. */
   if (isMatchRoute && pathParts[3] === "finish" && req.method === "POST") {
     try {
       const matchId = parseInt(pathParts[2]);
@@ -1127,8 +1193,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : GET /teams ---
-  // Permet de récupérer la liste des équipes depuis la base de données
+  /* Récupère la liste des équipes depuis la base de données. */
   if (url.pathname === "/teams" && req.method === "GET") {
     try {
       const result = await client.queryObject("SELECT * FROM teams");
@@ -1143,8 +1208,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
   
 
-// --- ROUTE : GET /leaderboard ---
-  // Permet de récupérer le classement de tous les joueurs trié par note globale (OVR)
+  /* Récupère le classement de tous les joueurs trié par note globale (OVR). */
   if (url.pathname === "/leaderboard" && req.method === "GET") {
     try {
       const result = await client.queryObject(`
@@ -1192,8 +1256,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
   
 
 
-  // --- ROUTE : GET /ws ---
-  // WebSockets pour le chat en direct (Sécurisé par Cookie JWT)
+  /* Authentifie l'utilisateur via le cookie JWT puis met à niveau la connexion HTTP en WebSocket. */
   if (url.pathname === "/ws" && req.method === "GET") {
     try {
       // 1. On cherche le token dans les cookies
@@ -1270,7 +1333,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
-  // --- ROUTE : GET /profile/:id/history ---
+  /* Récupère l'historique des matchs joués par un utilisateur spécifique. */
   if (url.pathname.startsWith("/profile/") && url.pathname.endsWith("/history") && req.method === "GET") {
     try {
       const userIdStr = url.pathname.split("/")[2];
@@ -1327,8 +1390,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
     }
   }
 
-  // --- ROUTE : GET /profile/:id ---
-  // Permet de récupérer les informations de profil et statistiques d'un joueur
+  /* Récupère les informations de profil et statistiques d'un joueur. */
   if (url.pathname.startsWith("/profile/") && req.method === "GET") {
     try {
       const userIdStr = url.pathname.split("/")[2];
@@ -1410,10 +1472,11 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
 
 
 
-  // ==========================================
-  // --- ROUTES D'ADMINISTRATION ---
-  // ==========================================
+  // ================================================================
+  // SECTION 5 — ROUTES D'ADMINISTRATION
+  // ================================================================
 
+  /* Bloque l'accès à toutes les routes /admin/ si l'utilisateur n'a pas le rôle administrateur. */
   const isAdminRoute = url.pathname.startsWith("/admin");
 
   if (isAdminRoute) {
@@ -1424,7 +1487,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
       // On découpe l'URL proprement en ignorant les slashs vides
       const pathParts = url.pathname.split("/").filter(Boolean); 
 
-      // 2. ROUTE : GET /admin/users (Lister tous les utilisateurs avec leurs statistiques)
+      /* Récupère la liste de tous les utilisateurs avec le nombre de matchs joués et de lobbys créés. */
       if (pathParts.length === 2 && pathParts[1] === "users" && req.method === "GET") {
         // Requête SQL optimisée avec des sous-requêtes pour compter les matchs et lobbys
         const query = `
@@ -1449,7 +1512,7 @@ Deno.serve({ port: 3000, cert, key }, async (req) => {
         return new Response(JSON.stringify(formattedRows), { status: 200, headers });
       }
 
-      // 3. ROUTE : PATCH /admin/users/:id/role (Modifier le rôle d'un utilisateur)
+      /* Modifie le rôle ("admin" ou "fan") d'un utilisateur spécifique. */
       if (pathParts.length === 4 && pathParts[1] === "users" && pathParts[3] === "role" && req.method === "PATCH") {
         const targetUserId = parseInt(pathParts[2]);
         if (isNaN(targetUserId)) {
