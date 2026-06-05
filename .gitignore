@@ -5,3 +5,6 @@
 # Fichiers de sécurité locaux (Ne jamais commit !)
 .env
 certs/
+
+# Fichiers de préparation à la soutenance
+PLAN_ORAL_LIVEFOOTSTATS.md
